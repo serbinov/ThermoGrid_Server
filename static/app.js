@@ -11,7 +11,20 @@ document.addEventListener('DOMContentLoaded', function() {
     let timeOffset = 0; // Смещение времени для навигации (в часах)
     let dragHandlersAttached = false; // чтобы не дублировать обработчики при пересоздании графика
     let maxPointsSetting = 1000; // по умолчанию
-    let approxEnabled = false;
+    // removed approx smoothing feature
+
+    // Persist hidden series per device across period changes
+    const hiddenKey = (deviceId) => `hiddenSeries:${deviceId}`;
+    const getHiddenSet = (deviceId) => {
+        try {
+            const raw = localStorage.getItem(hiddenKey(deviceId));
+            const arr = raw ? JSON.parse(raw) : [];
+            return new Set(arr.map(x => String(x)));
+        } catch (_) { return new Set(); }
+    };
+    const saveHiddenSet = (deviceId, set) => {
+        try { localStorage.setItem(hiddenKey(deviceId), JSON.stringify(Array.from(set))); } catch (_) {}
+    };
 
     const devicesListEl = document.getElementById('devices-list');
     const navButtons = document.querySelectorAll('.nav-button');
@@ -332,7 +345,6 @@ document.addEventListener('DOMContentLoaded', function() {
     async function renderSettingsView() {
         const form = document.getElementById('settings-form');
         const settings = await (await fetch('/api/settings')).json();
-        form.elements['server_ip'].value = settings.server_ip;
         form.elements['server_port'].value = settings.server_port;
         form.elements['ntp_enabled'].checked = settings.ntp_enabled;
         // загрузим max_points
@@ -342,12 +354,6 @@ document.addEventListener('DOMContentLoaded', function() {
         if (form.elements['max_points']) {
             form.elements['max_points'].value = maxPointsSetting;
         }
-        if (form.elements['repo_url']) {
-            form.elements['repo_url'].value = settings.repo_url || '';
-        }
-        if (form.elements['json_protocol_url']) {
-            form.elements['json_protocol_url'].value = settings.json_protocol_url || '/static/json_protocol.html';
-        }
 
         // перехватим submit для сохранения max_points
         form.addEventListener('submit', async (e) => {
@@ -355,9 +361,7 @@ document.addEventListener('DOMContentLoaded', function() {
             const payload = {
                 server_port: form.elements['server_port'].value,
                 ntp_enabled: form.elements['ntp_enabled'].checked,
-                max_points: parseInt(form.elements['max_points'].value || '1000', 10),
-                repo_url: form.elements['repo_url']?.value || '',
-                json_protocol_url: form.elements['json_protocol_url']?.value || ''
+                max_points: parseInt(form.elements['max_points'].value || '1000', 10)
             };
             try {
                 const resp = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
@@ -387,8 +391,9 @@ document.addEventListener('DOMContentLoaded', function() {
     // Всегда пересоздаем график для надежного применения настроек периода
     if (temperatureChart) { temperatureChart.destroy(); temperatureChart = null; }
 
-        const colors = ['#409eff', '#67c23a', '#e6a23c', '#f56c6c', '#909399'];
+    const colors = ['#409eff', '#67c23a', '#e6a23c', '#f56c6c', '#909399'];
         const datasets = [];
+    const hiddenSet = getHiddenSet(device.id);
         
         // Рассчитываем временные границы для запроса
         const now = Math.floor(Date.now() / 1000); // Текущее время в секундах
@@ -420,28 +425,23 @@ document.addEventListener('DOMContentLoaded', function() {
         // Обновляем заголовок графика с информацией о временном диапазоне
     // Заголовок обновим ниже после возможного пересчета диапазона
         
-        for (let i = 0; i < device.sensors.length; i++) {
-            const sensor = device.sensors[i];
+        // deterministic order by sensor_id
+        const sensorsOrdered = (device.sensors || []).slice().sort((a,b)=> (a.sensor_id ?? 0) - (b.sensor_id ?? 0));
+        for (let i = 0; i < sensorsOrdered.length; i++) {
+            const sensor = sensorsOrdered[i];
             const body = { device_id: device.id, sensor_id: sensor.sensor_id, start_time: startTime, end_time: endTime, max_points: maxPointsSetting };
             const history = await (await fetch('/api/history', {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body)
             })).json();
             let series = history.map(p => ({ x: p.timestamp * 1000, y: p.temperature_c }));
-            if (approxEnabled && series.length > 2) {
-                // Простое сглаживание скользящим средним (окно 3)
-                const smoothed = [];
-                for (let k = 0; k < series.length; k++) {
-                    if (k === 0 || k === series.length - 1) { smoothed.push(series[k]); continue; }
-                    const y = (series[k-1].y + series[k].y + series[k+1].y) / 3;
-                    smoothed.push({ x: series[k].x, y });
-                }
-                series = smoothed;
-            }
             datasets.push({
                 label: sensor.name || `Sensor ${sensor.sensor_id}`,
                 data: series,
-                borderColor: colors[i % colors.length], tension: 0.1, fill: false
+                borderColor: colors[i % colors.length], tension: 0.1, fill: false,
+                // Track sensor id for persistence and apply hidden state
+                _sensorId: sensor.sensor_id,
+                hidden: hiddenSet.has(String(sensor.sensor_id))
             });
             console.log(`Получено ${history.length} точек данных для сенсора ${sensor.sensor_id}`);
         }
@@ -460,9 +460,18 @@ document.addEventListener('DOMContentLoaded', function() {
 
         // Обновляем заголовок графика с информацией о временном диапазоне
     updateChartTitle(startTime, endTime);
-    // Обновляем текстовую информацию о периоде
-    const infoPeriod = document.getElementById('infoPeriod');
-    if (infoPeriod) infoPeriod.textContent = isAllTime ? 'всё время' : `${selectedPeriod} час${selectedPeriod>1?'ов':''}`;
+    // Вместо текста периода показываем даты начала/конца данных у устройства
+    (async () => {
+        try {
+            const resp = await fetch(`/api/device_range/${device.id}`);
+            const range = await resp.json();
+            const sEl = document.getElementById('infoStartDate');
+            const eEl = document.getElementById('infoEndDate');
+            const fmt = (sec) => sec==null? '--.--.----' : new Date(sec*1000).toLocaleDateString('ru-RU');
+            if (sEl) sEl.textContent = fmt(range.min);
+            if (eEl) eEl.textContent = fmt(range.max);
+        } catch (_) { /* ignore */ }
+    })();
 
         // Сохраняем реальное последнее время показаний по устройству (из sensors)
         try {
@@ -574,7 +583,27 @@ document.addEventListener('DOMContentLoaded', function() {
                     },
                     plugins: {
                         legend: {
-                            position: 'top'
+                            position: 'top',
+                            // Persist visibility toggles across rebuilds
+                            onClick: (e, legendItem, legend) => {
+                                const chart = legend.chart;
+                                const index = legendItem.datasetIndex;
+                                const visible = chart.isDatasetVisible(index);
+                                // Toggle visibility
+                                chart.setDatasetVisibility(index, !visible);
+                                chart.update();
+                                // Persist hidden set
+                try {
+                                    const ds = chart.data.datasets[index];
+                                    const sensorId = ds && ds._sensorId;
+                                    if (sensorId !== undefined) {
+                    const hs = getHiddenSet(device.id);
+                    const key = String(sensorId);
+                    if (visible) { hs.add(key); } else { hs.delete(key); }
+                                        saveHiddenSet(device.id, hs);
+                                    }
+                                } catch (_) { /* ignore persistence errors */ }
+                            }
                         },
                         tooltip: {
                             enabled: false
@@ -663,6 +692,20 @@ document.addEventListener('DOMContentLoaded', function() {
                     }
                 }]
             });
+
+            // Enforce persisted hidden state after chart creation
+            try {
+                const persistedHidden = getHiddenSet(device.id);
+                temperatureChart.data.datasets.forEach((ds, idx) => {
+                    const shouldHide = persistedHidden.has(String(ds._sensorId));
+                    if (shouldHide) {
+                        temperatureChart.setDatasetVisibility(idx, false);
+                        const meta = temperatureChart.getDatasetMeta(idx);
+                        if (meta) meta.hidden = true;
+                    }
+                });
+                temperatureChart.update('none');
+            } catch (e) { /* ignore */ }
 
             // Управление красной линией перетаскиванием по канвасу
             let isDragging = false;
@@ -825,25 +868,47 @@ document.addEventListener('DOMContentLoaded', function() {
                 const on = Math.abs(lastPoint.x - (temperatureChart.globalLatestTime || lastPoint.x)) > 1000;
                 cards.forEach(c => c.classList.toggle('highlight', on));
 
-                // Обновляем информационную строку и мини-шкалу
-                const infoCurrentTime = document.getElementById('infoCurrentTime');
-                const infoRange = document.getElementById('infoRange');
-                const format = (ts) => new Date(ts).toLocaleString('ru-RU', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' });
-                if (infoCurrentTime) infoCurrentTime.textContent = format(lastPoint.x);
-                if (infoRange) infoRange.textContent = `${format(startTime*1000)} — ${format(endTime*1000)}`;
-                const timelineBar = document.querySelector('.timeline-bar');
-                const windowEl = document.getElementById('timelineWindow');
-                const cursorEl = document.getElementById('timelineCursor');
-                if (timelineBar && windowEl && cursorEl) {
-                    const total = endTime*1000 - startTime*1000;
-                    const span = (isAllTime ? total : selectedPeriod*3600*1000);
-                    const widthPct = Math.max(1, Math.min(100, (span/total)*100));
-                    const leftPct = 0; // окно тянется от начала диапазона
-                    windowEl.style.left = `${leftPct}%`;
-                    windowEl.style.width = `${widthPct}%`;
-                    const cursorPct = ((lastPoint.x - startTime*1000) / total) * 100;
-                    cursorEl.style.left = `${Math.max(0, Math.min(100, cursorPct))}%`;
-                }
+                // Обновляем мини-шкалу: прямоугольник = видимый диапазон относительно глобального диапазона устройства
+        (async () => {
+                    try {
+                        const timelineBar = document.querySelector('.timeline-bar');
+                        const dataEl = document.getElementById('timelineData');
+                        const windowEl = document.getElementById('timelineWindow');
+                        const cursorEl = document.getElementById('timelineCursor');
+                        if (!(timelineBar && dataEl && windowEl && cursorEl)) return;
+                        // Запросим глобальные границы устройства (секунды)
+                        const resp = await fetch(`/api/device_range/${device.id}`);
+                        const range = await resp.json();
+            // Вставим даты по краям
+            const sEl = document.getElementById('infoStartDate');
+            const eEl = document.getElementById('infoEndDate');
+            const fmt = (sec) => sec==null? '--.--.----' : new Date(sec*1000).toLocaleDateString('ru-RU');
+            if (sEl) sEl.textContent = fmt(range.min);
+            if (eEl) eEl.textContent = fmt(range.max);
+                        const gMin = (range && range.min != null) ? range.min * 1000 : NaN;
+                        const gMax = (range && range.max != null) ? range.max * 1000 : NaN;
+                        if (!isFinite(gMin) || !isFinite(gMax) || gMax <= gMin) {
+                            dataEl.style.width = '0%';
+                            windowEl.style.width = '0%';
+                            cursorEl.style.left = '0%';
+                            return;
+                        }
+                        // Заполняем зону наличия данных (весь доступный диапазон устройства)
+                        dataEl.style.left = '0%';
+                        dataEl.style.width = '100%';
+                        const total = gMax - gMin;
+                        const winStart = startTime * 1000;
+                        const winEnd = endTime * 1000;
+                        const winLeftPct = ((winStart - gMin) / total) * 100;
+                        const winWidthPct = Math.max(1, Math.min(100, ((winEnd - winStart) / total) * 100));
+                        windowEl.style.left = `${Math.max(0, Math.min(100, winLeftPct))}%`;
+                        windowEl.style.width = `${winWidthPct}%`;
+                        const cursorPct = ((lastPoint.x - gMin) / total) * 100;
+                        cursorEl.style.left = `${Math.max(0, Math.min(100, cursorPct))}%`;
+                    } catch (e) {
+                        // ignore
+                    }
+                })();
             }
         } else {
             timeSlider.disabled = true;
@@ -1058,20 +1123,7 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     });
 
-    // Кнопка аппроксимации (сглаживания)
-    const approxBtn = document.getElementById('approx-toggle');
-    if (approxBtn) {
-        approxBtn.addEventListener('click', async () => {
-            approxEnabled = !approxEnabled;
-            approxBtn.classList.toggle('active', approxEnabled);
-            if (selectedDeviceId && currentView === 'dashboard') {
-                try {
-                    const device = await (await fetch(`/api/device/${selectedDeviceId}`)).json();
-                    if (device) updateChart(device);
-                } catch (e) { console.error(e); }
-            }
-        });
-    }
+    // removed approx toggle button and logic
     
     // Обработчики навигации по времени
     document.getElementById('chart-prev').addEventListener('click', async () => {
@@ -1096,6 +1148,20 @@ document.addEventListener('DOMContentLoaded', function() {
         if (selectedDeviceId) {
             try {
                 // Получаем свежие данные устройства для обновления графика
+                const device = await (await fetch(`/api/device/${selectedDeviceId}`)).json();
+                if (device) updateChart(device);
+            } catch (error) {
+                console.error('Error fetching device details:', error);
+            }
+        }
+    });
+
+    // Кнопка «сейчас»: сбрасывает смещение и перерисовывает окно
+    document.getElementById('chart-now').addEventListener('click', async () => {
+        if (selectedPeriod === 'all') return; // в режиме все время окно равно данным
+        timeOffset = 0;
+        if (selectedDeviceId) {
+            try {
                 const device = await (await fetch(`/api/device/${selectedDeviceId}`)).json();
                 if (device) updateChart(device);
             } catch (error) {
@@ -1289,16 +1355,11 @@ document.addEventListener('DOMContentLoaded', function() {
     const openAbout = async () => {
         try {
             const s = await (await fetch('/api/settings')).json();
-            const repoLink = s.repo_url ? `<a href="${s.repo_url}" target="_blank" rel="noopener">${s.repo_url}</a>` : '—';
-            const protoLink = s.json_protocol_url ? `<a href="${s.json_protocol_url}" target="_blank" rel="noopener">${s.json_protocol_url}</a>` : '—';
             aboutContent.innerHTML = `
                 <div><strong>Версия:</strong> ${s.app_version || '—'}</div>
-                <div><strong>Сервер IP:</strong> ${s.server_ip || '—'}</div>
-                <div><strong>Репозиторий:</strong> ${repoLink}</div>
-                <div><strong>JSON протокол:</strong> ${protoLink}</div>
                 <div><strong>Разработчик:</strong> ${s.developer || 'Serbinov Oleg'}</div>
-                <hr style="margin:10px 0;">
-                <div>Полезно: используйте ограничение точек и аппроксимацию для ускорения отображения больших диапазонов данных.</div>
+                ${s.repo_url ? `<div><strong>Репозиторий:</strong> <a href="${s.repo_url}" target="_blank" rel="noopener">${s.repo_url}</a></div>` : ''}
+                ${s.json_protocol_url ? `<div><strong>ThermoGrid Telemetry JSON Protocol (TG-TJP v1.0):</strong> <a href="${s.json_protocol_url}" target="_blank" rel="noopener">${s.json_protocol_url}</a></div>` : ''}
             `;
         } catch (e) {
             aboutContent.textContent = 'Ошибка загрузки информации.';

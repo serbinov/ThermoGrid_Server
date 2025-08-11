@@ -1,15 +1,29 @@
 # file: main.py
-import sys, webbrowser, threading, os, logging, sqlite3, time, json, socket, struct, socketserver
+import sys, webbrowser, threading, os, logging, sqlite3, time, json, struct, socketserver
 from uvicorn import Config, Server
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QStyle
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 from PySide6.QtGui import QIcon, QAction
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
 # --- Logging & Config ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# When running without a console (pythonw/--noconsole), sys.stderr may be None.
+# In that case, log to a file instead of the default stream handler.
+try:
+    if getattr(sys, 'stderr', None) is None:
+        logging.basicConfig(
+            level=logging.INFO,
+            filename=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'thermogrid.log'),
+            filemode='a',
+            format='%(asctime)s - %(levelname)s - %(message)s'
+        )
+    else:
+        logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+except Exception:
+    # Fallback to a very basic config in case of unexpected logging setup issues
+    logging.basicConfig(level=logging.INFO)
 APP_NAME = "ThermoGridServer"
 APP_VERSION = "0.1.0"
 HOST = "0.0.0.0"  # Слушать на всех сетевых интерфейсах
@@ -160,6 +174,19 @@ def get_readings_history(device_id, sensor_id, start_time=None, end_time=None, l
                     max_points = 1000
             return downsample(rows, max_points)
 
+def get_device_time_range(device_id: str):
+    """Return the earliest and latest reading timestamps for the device across all sensors.
+    If there are no readings, returns None for both.
+    """
+    with sqlite3.connect(DB_NAME) as conn:
+        c = conn.cursor()
+        c.execute("SELECT MIN(timestamp), MAX(timestamp) FROM readings WHERE device_id=?", (device_id,))
+        row = c.fetchone()
+        if not row or (row[0] is None and row[1] is None):
+            return {"min": None, "max": None}
+        return {"min": int(row[0]) if row[0] is not None else None,
+                "max": int(row[1]) if row[1] is not None else None}
+
 # --- NTP Server ---
 class NTPRequestHandler(socketserver.BaseRequestHandler):
     def handle(self):
@@ -214,11 +241,31 @@ class ApplicationManager(QObject):
 
 # --- FastAPI ---
 app = FastAPI()
-app.mount("/static", StaticFiles(directory="static"), name="static")
+# Serve static from bundle-aware path
+app.mount("/static", StaticFiles(directory=os.path.join(BUNDLE_DIR, "static")), name="static")
+# Serve icons for favicon and UI assets
+app.mount("/icons", StaticFiles(directory=os.path.join(BUNDLE_DIR, "icons")), name="icons")
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    ico_path = os.path.join(BUNDLE_DIR, "icons", "app_icon.ico")
+    if os.path.exists(ico_path):
+        return FileResponse(ico_path)
+    # Fallback to any available .ico in icons
+    try:
+        for name in os.listdir(os.path.join(BUNDLE_DIR, "icons")):
+            if name.lower().endswith('.ico'):
+                return FileResponse(os.path.join(BUNDLE_DIR, "icons", name))
+    except Exception:
+        pass
+    # If nothing found, return 404
+    return JSONResponse({"detail": "favicon not found"}, status_code=404)
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    with open("index.html", encoding="utf-8") as f: return f.read()
+    index_path = os.path.join(BUNDLE_DIR, "index.html")
+    with open(index_path, encoding="utf-8") as f:
+        return f.read()
 
 @app.post("/")
 def api_root_post(data: dict): save_device_data(data); return {"status": "ok"}
@@ -228,6 +275,11 @@ def api_get_devices(): return get_devices()
 
 @app.get("/api/device/{device_id}")
 def api_get_device_details(device_id: str): return get_device_details(device_id)
+
+@app.get("/api/device_range/{device_id}")
+def api_get_device_time_range(device_id: str):
+    """Get global min/max timestamps (seconds) for a device across all sensors."""
+    return get_device_time_range(device_id)
 
 @app.post("/api/history")
 async def api_get_history(request: Request): 
@@ -242,15 +294,11 @@ async def api_get_history(request: Request):
 
 @app.get("/api/settings")
 def api_get_settings():
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(("8.8.8.8", 80)); ip = s.getsockname()[0]; s.close()
     return {
-        "server_ip": ip,
         "server_port": get_setting("server_port", "9090"),
         "ntp_enabled": get_setting("ntp_enabled", "false") == "true",
         "max_points": int(get_setting("max_points", "1000") or 1000),
         "app_version": APP_VERSION,
-        "repo_url": get_setting("repo_url", ""),
-        "json_protocol_url": get_setting("json_protocol_url", "/static/json_protocol.html"),
         "developer": "Serbinov Oleg"
     }
 
@@ -264,16 +312,6 @@ async def api_set_settings(request: Request):
             mp = int(settings['max_points'])
             if mp < 100: mp = 100
             set_setting('max_points', mp)
-        except Exception:
-            pass
-    if 'repo_url' in settings:
-        try:
-            set_setting('repo_url', settings['repo_url'])
-        except Exception:
-            pass
-    if 'json_protocol_url' in settings:
-        try:
-            set_setting('json_protocol_url', settings['json_protocol_url'])
         except Exception:
             pass
     if hasattr(request.app.state, 'settings_changed_callback'): request.app.state.settings_changed_callback()
@@ -295,15 +333,24 @@ def main():
     app_manager = ApplicationManager()
     app.state.settings_changed_callback = app_manager.settings_changed.emit
     app_manager.check_and_manage_ntp_server()
-    config = Config(app=app, host=HOST, port=server_port, log_level="warning")
+    # Disable Uvicorn's default log_config to avoid TTY-dependent formatters when no console
+    config = Config(app=app, host=HOST, port=server_port, log_level="warning", log_config=None, access_log=False)
     server = Server(config)
     server_thread = threading.Thread(target=server.run, daemon=True)
     server_thread.start()
     def shutdown_web_server(): server.should_exit = True; server_thread.join(timeout=5)
     qt_app.aboutToQuit.connect(app_manager.shutdown_ntp_worker)
     qt_app.aboutToQuit.connect(shutdown_web_server)
-    icon_path = os.path.join(BUNDLE_DIR, "icons", "app_icon.svg")
-    tray_icon = QSystemTrayIcon(QIcon(icon_path) if os.path.exists(icon_path) else qt_app.style().standardIcon(QStyle.SP_ComputerIcon), parent=qt_app)
+    # Prefer .ico to avoid QtSvg plugin; fallback to .png; finally default icon
+    ico_candidates = [
+        os.path.join(BUNDLE_DIR, "icons", "app_icon.ico"),
+        os.path.join(BUNDLE_DIR, "icons", "app_icon1_.ico"),
+        os.path.join(BUNDLE_DIR, "icons", "app_icon_old.ico"),
+        os.path.join(BUNDLE_DIR, "icons", "device_online.ico")
+    ]
+    icon_file = next((p for p in ico_candidates if os.path.exists(p)), None)
+    qicon = QIcon(icon_file) if icon_file else qt_app.style().standardIcon(QStyle.SP_ComputerIcon)
+    tray_icon = QSystemTrayIcon(qicon, parent=qt_app)
     tray_icon.setToolTip(APP_NAME)
     menu = QMenu(); open_action = QAction("Open in Browser"); open_action.triggered.connect(open_in_browser); menu.addAction(open_action)
     menu.addSeparator(); quit_action = QAction("Quit"); quit_action.triggered.connect(qt_app.quit); menu.addAction(quit_action)

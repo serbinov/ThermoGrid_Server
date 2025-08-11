@@ -3,6 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <title>ThermoGrid Server</title>
+    <!-- Favicon / Tab Icon -->
+    <link rel="icon" href="/favicon.ico" sizes="any">
+    <link rel="icon" type="image/svg+xml" href="/icons/app_icon.svg">
+    <link rel="shortcut icon" href="/favicon.ico">
+    <meta name="theme-color" content="#1976d2">
     <link rel="stylesheet" href="/static/style.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
@@ -74,22 +79,15 @@
                             </div>
                             <!-- Компактная строка времени и мини-шкала -->
                             <div class="chart-time-info">
-                                <div class="time-info-text">
-                                    <span>Точка:</span>
-                                    <strong id="infoCurrentTime">--</strong>
-                                    <span class="sep">|</span>
-                                    <span>Диапазон:</span>
-                                    <strong id="infoRange">--</strong>
-                                    <span class="sep">|</span>
-                                    <span>Период:</span>
-                                    <strong id="infoPeriod">1 час</strong>
-                                </div>
+                                <div class="time-info-text left"><strong id="infoStartDate">--.--.----</strong></div>
                                 <div class="timeline-container">
                                     <div class="timeline-bar">
+                                        <div id="timelineData" class="timeline-data"></div>
                                         <div id="timelineWindow" class="timeline-window"></div>
                                         <div id="timelineCursor" class="timeline-cursor"></div>
                                     </div>
                                 </div>
+                                <div class="time-info-text right"><strong id="infoEndDate">--.--.----</strong></div>
                             </div>
                             <div class="chart-period-buttons">
                                 <button class="chart-button active" data-period="1">1 ЧАС</button>
@@ -99,7 +97,6 @@
                                 <button class="chart-button" data-period="24">24 ЧАСА</button>
                                 <button class="chart-button" data-period="168">7 СУТОК</button>
                                 <button class="chart-button" data-period="all">ВСЁ ВРЕМЯ</button>
-                                <button id="approx-toggle" class="chart-button" title="Сглаживание/аппроксимация графика">АПРОКСИМАЦИЯ</button>
                                 <div class="chart-navigation-buttons">
                                     <button id="chart-prev" class="chart-nav-button" title="Назад">◀</button>
                                     <button id="chart-now" class="chart-nav-button" title="Текущее время">⟳</button>
@@ -121,11 +118,6 @@
                         <h2>Настройки сервера</h2>
                         <form id="settings-form">
                             <div class="form-group">
-                                <label for="server-ip">IP адрес сервера</label>
-                                <input type="text" id="server-ip" name="server_ip" readonly>
-                                <small>Адрес, на который устройства отправляют данные</small>
-                            </div>
-                            <div class="form-group">
                                 <label for="server-port">Сетевой порт</label>
                                 <input type="number" id="server-port" name="server_port" min="1024" max="65535" placeholder="9090">
                                 <small>Требует перезапуск для применения</small>
@@ -134,14 +126,6 @@
                                 <label for="max-points">Максимум точек на графике</label>
                                 <input type="number" id="max-points" name="max_points" min="100" step="100" placeholder="1000">
                                 <small>Ограничение числа точек ускоряет загрузку и отображение (по умолчанию 1000)</small>
-                            </div>
-                            <div class="form-group">
-                                <label for="repo-url">Ссылка на репозиторий</label>
-                                <input type="url" id="repo-url" name="repo_url" placeholder="https://github.com/user/repo">
-                            </div>
-                            <div class="form-group">
-                                <label for="json-proto-url">Ссылка на JSON протокол</label>
-                                <input type="url" id="json-proto-url" name="json_protocol_url" placeholder="/static/json_protocol.html">
                             </div>
                             <div class="form-group checkbox-group">
                                 <input type="checkbox" id="ntp-enabled" name="ntp_enabled">
