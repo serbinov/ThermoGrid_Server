@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<svg width="24" height="24" xmlns="http://www.w3.org/2000/svg" xmlns:svg="http://www.w3.org/2000/svg">
+ <!-- Белый фон в форме квадрата -->
+ <!-- Большая буква 'T', нарисованная как векторный контур -->
+ <g class="layer">
+  <title>Layer 1</title>
+  <rect fill="#ffff00" height="6.3" id="svg_8" width="23.9" x="-0.04" y="5.96"/>
+  <rect fill="#0000ff" height="5.7" id="svg_7" width="24.1" x="-0.04" y="18.26"/>
+  <rect fill="#00ff00" height="6" id="svg_6" transform="matrix(1 0 0 1 0 0)" width="24" x="-0.04" y="12.26"/>
+  <rect fill="#ff0000" height="5.9" id="svg_1" transform="matrix(1 0 0 1 0 0)" width="24" x="0" y="0.1"/>
+  <path d="m5,4l14,0l0,4l-5,0l0,12l-4,0l0,-12l-5,0l0,-4z" fill="black" id="svg_2"/>
+  <line fill="none" id="svg_3" transform="matrix(1 0 0 1 0 0)" x1="2.56" x2="13.16" y1="22.56" y2="22.96"/>
+  <line fill="none" id="svg_4" x1="13.56" x2="20.26" y1="22.26" y2="22.26"/>
+ </g>
+</svg>

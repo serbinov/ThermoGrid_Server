@@ -1,0 +1,1874 @@
+#include <Arduino.h>
+#include <SPI.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_ST7789.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <EEPROM.h>
+#include <Update.h>
+#include <string.h>
+#include <time.h>
+#include <ESPmDNS.h>
+#include <math.h> // Для функции roundf
+
+// Используем нативный стек для Wi-Fi и Ethernet
+#include <WiFi.h>
+#include <ETH.h>
+#include <DNSServer.h>
+#include <WebServer.h>
+
+#if defined(ESP32)
+#include "esp_mac.h" // For esp_read_mac(), esp_base_mac_addr_set() and ESP_MAC_... constants
+#else
+#error "This code requires an ESP32 board!"
+#endif
+
+
+// ======================= Hardware configuration =======================
+// CPU = ESP32-S3FH4R2
+// PHY model = W5500
+// Display = ST7789V GMT020-02
+
+
+// ======================= Firmware Version =======================
+#define FW_VERSION "v3.06" 
+
+// ======================= Pin Definitions =======================
+// --- Ethernet SPI Pins (на стандартной шине VSPI / SPI2_HOST) ---
+#define ETH_SCLK_GPIO         14
+#define ETH_MISO_GPIO         12
+#define ETH_MOSI_GPIO         13
+#define ETH_CS_GPIO           5
+#define ETH_INT_GPIO          17
+#define ETH_RST_GPIO          18
+
+// --- Display SPI Pins (ПЕРЕНЕСЕНЫ НА ВТОРУЮ ШИНУ HSPI / SPI3_HOST) ---
+#define TFT_SCLK_GPIO         43
+#define TFT_MOSI_GPIO         1
+#define TFT_MISO_GPIO         44
+#define TFT_CS_GPIO           7
+#define TFT_DC_GPIO           10
+#define TFT_RST_GPIO          11
+
+// --- Остальные пины без изменений ---
+#define ONE_WIRE_1_GPIO       4
+#define LED_RED_GPIO          6
+#define ONE_WIRE_2_GPIO       8
+#define ONE_WIRE_3_GPIO       9
+#define ONE_WIRE_4_GPIO       21
+#define LED_GREEN_GPIO        33
+#define OPTO_SW_GPIO          38
+#define RESERVE_GPIO_45       45
+
+// ======================= DS18B20 Settings =======================
+#define NUM_DS18B20_BUSES   4
+#define MAX_SENSORS_PER_BUS 4
+#define MAX_SENSORS_TOTAL (NUM_DS18B20_BUSES * MAX_SENSORS_PER_BUS)
+#define DS18B20_CONVERSION_TIME_MS 800
+
+const int oneWireGpioPins[NUM_DS18B20_BUSES] = { ONE_WIRE_1_GPIO, ONE_WIRE_2_GPIO, ONE_WIRE_3_GPIO, ONE_WIRE_4_GPIO };
+
+// ======================= ST7789VW Display Settings (240x320) =======================
+#define TFT_WIDTH_ST7789   240
+#define TFT_HEIGHT_ST7789  320
+
+SPIClass spiTFT(HSPI); 
+Adafruit_ST7789 tft(&spiTFT, TFT_CS_GPIO, TFT_DC_GPIO, TFT_RST_GPIO);
+
+
+// Custom Colors
+#ifndef ST77XX_PURPLE
+#define ST77XX_PURPLE   0x780F
+#endif
+#ifndef ST77XX_PINK
+#define ST77XX_PINK     0xFC18
+#endif
+#ifndef ST77XX_LIME
+#define ST77XX_LIME     0x07E0
+#endif
+#ifndef ST77XX_DARKGREY
+#define ST77XX_DARKGREY 0x4208
+#endif
+#ifndef ST77XX_MYGOLD
+#define ST77XX_MYGOLD   0xFE00
+#endif
+
+// DS18B20 objects
+OneWire oneWire[NUM_DS18B20_BUSES] = { OneWire(oneWireGpioPins[0]), OneWire(oneWireGpioPins[1]), OneWire(oneWireGpioPins[2]), OneWire(oneWireGpioPins[3]) };
+DallasTemperature sensors[NUM_DS18B20_BUSES];
+DeviceAddress tempSensorAddresses[MAX_SENSORS_TOTAL];
+int detectedSensorCount[NUM_DS18B20_BUSES];
+float currentTemperatures[MAX_SENSORS_TOTAL];
+float tempCalibration[MAX_SENSORS_TOTAL];
+int totalDetectedSensors = 0;
+
+// ======================= WiFi Configuration Constants =======================
+#define CFG_WIFI_MODE_DISABLED 0
+#define CFG_WIFI_MODE_STA  1
+#define CFG_WIFI_MODE_AP   2
+
+// ======================= EEPROM Configuration =======================
+#define EEPROM_SIZE 1650
+#define EEPROM_MAGIC_NUMBER 0xDEADBEEF
+constexpr uint8_t EEPROM_CONFIG_VERSION = 16; 
+
+struct EepromConfig {
+    uint32_t magic;
+    uint8_t version;
+    IPAddress staticIP;
+    IPAddress gateway;
+    IPAddress subnet;
+    IPAddress dnsServer;
+    char pduIPString[16];
+    char pduCommand[65];
+    float alarmTemp;
+    float calOffsets[MAX_SENSORS_TOTAL];
+    int8_t gmtOffsetHours;
+    float graphTempThresholds[3];
+    uint16_t graphTempColors[4];
+    char remoteServerIP[16];
+    uint16_t remoteSendIntervalSec;
+    bool remoteSendEnabled;
+    bool useRemoteServerAsNtp; 
+    bool wifiEnabled;
+    uint8_t wifiMode;
+    char wifiSsid[33];
+    char wifiPassword[65];
+    char wifiApSsid[33];
+    char wifiApPassword[65];
+    bool narodmonSendEnabled;
+    uint16_t narodmonSendIntervalSec;
+    char narodmonMac[18];
+    char narodmonSensorIDs[MAX_SENSORS_TOTAL][12];
+    char sensorNames[MAX_SENSORS_TOTAL][21];
+    uint32_t graphIntervalSeconds;
+    float geoLat;
+    float geoLon;
+    uint16_t remoteServerPort;
+    char deviceName[33];
+    uint8_t movingAverageWindowSize; 
+};
+
+// ======================= DEFAULT EEPROM CONFIGURATION VALUES =======================
+const EepromConfig DEFAULT_CONFIG = {
+    .magic = EEPROM_MAGIC_NUMBER, .version = EEPROM_CONFIG_VERSION,
+    .staticIP = IPAddress(192, 168, 0, 123), .gateway = IPAddress(192, 168, 0, 1),
+    .subnet = IPAddress(255, 255, 255, 0), .dnsServer = IPAddress(8, 8, 8, 8),
+    .pduIPString = "192.168.0.111", .pduCommand = "outlet1=ON",
+    .alarmTemp = 38.5f, .calOffsets = {0.0f}, .gmtOffsetHours = 7,
+    .graphTempThresholds = {20.0f, 30.0f, 38.0f},
+    .graphTempColors = {ST77XX_BLUE, ST77XX_GREEN, ST77XX_MYGOLD, ST77XX_RED},
+    .remoteServerIP = "0.0.0.0", .remoteSendIntervalSec = 60, .remoteSendEnabled = false,
+    .useRemoteServerAsNtp = false,
+    .wifiEnabled = true, .wifiMode = CFG_WIFI_MODE_STA, .wifiSsid = "YourNetworkSSID",
+    .wifiPassword = "YourNetworkPassword", .wifiApSsid = "TermoEth_Monitor", .wifiApPassword = "",
+    .narodmonSendEnabled = false, .narodmonSendIntervalSec = 300, .narodmonMac = "",
+    .narodmonSensorIDs = {{0}}, .sensorNames = {{0}},
+    .graphIntervalSeconds = 600,
+    .geoLat = 0.0f, .geoLon = 0.0f,
+    .remoteServerPort = 80,
+    .deviceName = "TermoEth Monitor",
+    .movingAverageWindowSize = 10
+};
+
+EepromConfig currentConfig;
+static uint32_t lastAppliedGraphInterval = 0;
+
+// ======================= Ethernet & WiFi Settings =======================
+byte device_mac[] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+char currentPduIPString[16], currentPduCommand[65], currentRemoteServerIP[16];
+uint16_t currentRemoteSendIntervalSec;
+bool currentRemoteSendEnabled;
+bool currentNarodmonSendEnabled_op;
+uint16_t currentNarodmonSendIntervalSec_op;
+char currentNarodmonMac_op[18];
+char currentNarodmonSensorIDs_op[MAX_SENSORS_TOTAL][12];
+
+// ======================= Network State Management =======================
+static volatile bool eth_connected = false;
+bool wifiStaIsActive = false;
+bool apModeIsActive = false;
+String networkStatusString = "Initializing...";
+
+// ======================= Time Settings =======================
+const char* ntpServerName = "pool.ntp.org";
+bool timeIsSynchronized = false;
+
+// ======================= Web Server =======================
+WebServer webServer(80);
+DNSServer dnsServer;
+const byte DNS_PORT = 53;
+String webServerMessage = "";
+bool isOtaUpdating = false;
+
+// ======================= UI Layout & Graph Constants =======================
+#define INFO_LINE_HEIGHT 10
+#define MAX_DISPLAY_SENSOR_BOXES 4
+#define SENSOR_BOX_WIDTH 53
+#define SENSOR_BOX_HEIGHT 35
+#define SENSOR_BOX_SPACING 5
+#define SENSOR_BOX_Y_START (2 * INFO_LINE_HEIGHT + 5 + 5)
+#define SENSOR_BOX_LABEL_Y_OFFSET 2
+#define SENSOR_BOX_VALUE_Y_OFFSET 15
+#define INFO_LINES_Y_START (SENSOR_BOX_Y_START + SENSOR_BOX_HEIGHT + 5)
+#define INFO_VALUE_X_OFFSET 85
+#define PDU_INFO_MAX_CMD_DISPLAY_LEN 15
+#define REMOTE_INFO_LINE_Y (INFO_LINES_Y_START + 4 * INFO_LINE_HEIGHT)
+#define GRAPH_AREA_Y_START (INFO_LINES_Y_START + 6 * INFO_LINE_HEIGHT + 9)
+#define GRAPH_BORDER_X 1
+#define GRAPH_BORDER_W (TFT_WIDTH_ST7789 - 2 * GRAPH_BORDER_X)
+#define GRAPH_SENSORS_TO_PLOT 4
+float prevTemperaturesForGraph[GRAPH_SENSORS_TO_PLOT];
+float actualGraphScaleMin = 0.0, actualGraphScaleMax = 50.0, alarmTemperatureThreshold_op;
+
+// ======================= Global State Variables and Timers =======================
+bool alarmActive = false, pduCommandSent = false, conversionStarted = false;
+#define ALARM_HYSTERESIS_C 0.5f 
+enum RemoteSendStatus { RSS_NA, RSS_OK, RSS_FAIL, RSS_PENDING, RSS_DISABLED };
+RemoteSendStatus lastRemoteSendStatus = RSS_NA;
+
+unsigned long lastTempRequestTime = 0, lastSerialPrintTime = 0, lastDisplayUpdateTime = 0;
+unsigned long lastMaxTempCalcTime = 0, lastSensorDetectTime = 0, lastRemoteSendTime = 0, lastNarodmonSendTime = 0;
+const long tempRequestInterval = 1000, serialPrintInterval = 10000;
+const long displayUpdateInterval = 1000, maxTempCalcInterval = 5000, sensorDetectInterval = 30000;
+String currentTimeString = "HH:MM:SS";
+
+// Display optimization variables
+String prevTimeString = "", prevNetworkStatusDisplay = "", prevAlarmTempString = "", prevPduInfoOnDisplay = "";
+String prevUptimeString = "";
+float prevTemperatures[MAX_SENSORS_TOTAL];
+long prevHeap = 0;
+bool forceFullRedraw = true;
+
+// ======================= Temperature History =======================
+unsigned long HISTORY_INTERVAL_MS;
+#define HISTORY_SIZE 432
+float historyMaxTemps[MAX_SENSORS_TOTAL][HISTORY_SIZE];
+float historyMinTemps[MAX_SENSORS_TOTAL][HISTORY_SIZE];
+
+
+int currentHistorySlot = 0;
+unsigned long lastHistorySlotUpdateMillis = 0;
+float overallMax72h = -200.0f, overallMin72h = 200.0f;
+
+// ======================= Temperature Filtering (Moving Average) =======================
+#define USE_MOVING_AVERAGE_FILTER 1
+#define MAX_MOVING_AVERAGE_WINDOW_SIZE 50 
+float tempFilterHistory[MAX_SENSORS_TOTAL][MAX_MOVING_AVERAGE_WINDOW_SIZE];
+int tempFilterHistoryIndex[MAX_SENSORS_TOTAL];
+
+// ======================= Function Prototypes =======================
+void autoDetectDs18b20();
+void handleTemperatureReading();
+void printTemperatureDataToSerial();
+String deviceAddressToString(const DeviceAddress deviceAddress);
+void sendPduCommand();
+void handleRemoteDataSend();
+void handleNarodmonSend();
+void loadConfig();
+void saveConfig(bool rebootAfter);
+void setDefaultConfig(EepromConfig& cfg);
+void applyConfig();
+void drawTemperatureBarGraph(int x, int y, int w, int h, float displayMinTemp, float displayMaxTemp);
+void updateStaticInfoOnDisplay();
+void updateDynamicInfoOnDisplay();
+void handleTimeUpdate();
+String formatUptime(unsigned long ms);
+void updateHistoryData();
+void calculateOverallMinMaxTemperatures();
+String rgb565ToHtmlColor(uint16_t color);
+String Sprintf(const char *format, ...);
+void setupWebServer();
+void initializeNetwork();
+void handleNetworkMaintenance();
+
+// Prototypes for HTML generation
+String serveHtmlHeader(const char* pageTitle);
+String serveJavascript();
+String serveApModeConfigPage();
+String serveCurrentTemperaturesSection();
+String serveDeviceInfoSection();
+String serveSettingsSection();
+String serveCalibrationSection();
+String serveOtaSection();
+String serveColorSelect(const char* name, uint16_t selectedValue);
+
+// Web handlers
+void handleRoot();
+void handleDataJson();
+void handleSettingsGet();
+void handleSettingsPost();
+void handleCalibratePost();
+void handleUpdate();
+void handleUpdateUpload();
+void handleNotFound();
+
+void WiFiEvent(WiFiEvent_t event);
+
+
+// ======================= String Formatting Helper =======================
+String Sprintf(const char *format, ...) {
+    char loc_buf[256];
+    char * temp = loc_buf;
+    va_list arg;
+    va_list copy;
+    va_start(arg, format);
+    va_copy(copy, arg);
+    int len = vsnprintf(temp, sizeof(loc_buf), format, copy);
+    va_end(copy);
+    if(len < 0) {
+        va_end(arg);
+        return "";
+    };
+    if(len >= sizeof(loc_buf)){
+        temp = (char*) malloc(len+1);
+        if(temp == NULL) {
+            va_end(arg);
+            return "";
+        }
+        len = vsnprintf(temp, len+1, format, arg);
+    }
+    va_end(arg);
+    String ret(temp);
+    if(temp != loc_buf){
+        free(temp);
+    }
+    return ret;
+}
+
+// ======================= EEPROM Functions =======================
+void setDefaultConfig(EepromConfig& cfg) {
+    Serial.println(F("Setting default configuration from DEFAULT_CONFIG constant."));
+    memcpy(&cfg, &DEFAULT_CONFIG, sizeof(EepromConfig));
+    for (int i = 0; i < MAX_SENSORS_TOTAL; i++) {
+        cfg.calOffsets[i] = 0.0f;
+        cfg.narodmonSensorIDs[i][0] = '\0';
+        cfg.sensorNames[i][0] = '\0';
+    }
+}
+
+void applyConfig() {
+    Serial.println(F("Applying configuration settings on-the-fly..."));
+
+    static uint8_t lastAppliedWindowSize = 0;
+
+    strncpy(currentPduIPString, currentConfig.pduIPString, sizeof(currentPduIPString) - 1); currentPduIPString[sizeof(currentPduIPString) - 1] = '\0';
+    strncpy(currentPduCommand, currentConfig.pduCommand, sizeof(currentPduCommand) - 1); currentPduCommand[sizeof(currentPduCommand) - 1] = '\0';
+    alarmTemperatureThreshold_op = currentConfig.alarmTemp;
+    for (int i = 0; i < MAX_SENSORS_TOTAL; i++) { tempCalibration[i] = currentConfig.calOffsets[i]; }
+
+    const char* ntp_server_to_use = ntpServerName;
+    if (currentConfig.useRemoteServerAsNtp && strlen(currentConfig.remoteServerIP) > 0 && String(currentConfig.remoteServerIP) != "0.0.0.0") {
+        ntp_server_to_use = currentConfig.remoteServerIP;
+    }
+    long gmtOffset_sec = (long)currentConfig.gmtOffsetHours * 3600L;
+    configTime(gmtOffset_sec, 0, ntp_server_to_use);
+    Serial.printf("Timezone set to GMT%d, NTP server: %s\n", currentConfig.gmtOffsetHours, ntp_server_to_use);
+
+    strncpy(currentRemoteServerIP, currentConfig.remoteServerIP, sizeof(currentRemoteServerIP) - 1); currentRemoteServerIP[sizeof(currentRemoteServerIP) - 1] = '\0';
+    currentRemoteSendIntervalSec = currentConfig.remoteSendIntervalSec;
+    currentRemoteSendEnabled = currentConfig.remoteSendEnabled;
+
+    currentNarodmonSendEnabled_op = currentConfig.narodmonSendEnabled;
+    currentNarodmonSendIntervalSec_op = currentConfig.narodmonSendIntervalSec;
+    strncpy(currentNarodmonMac_op, currentConfig.narodmonMac, sizeof(currentNarodmonMac_op) - 1); currentNarodmonMac_op[sizeof(currentNarodmonMac_op) - 1] = '\0';
+    for(int i = 0; i < MAX_SENSORS_TOTAL; i++) {
+        strncpy(currentNarodmonSensorIDs_op[i], currentConfig.narodmonSensorIDs[i], sizeof(currentNarodmonSensorIDs_op[i]) - 1);
+        currentNarodmonSensorIDs_op[i][sizeof(currentNarodmonSensorIDs_op[i]) - 1] = '\0';
+    }
+    
+    if (lastAppliedWindowSize == 0) { // First run
+        lastAppliedWindowSize = currentConfig.movingAverageWindowSize;
+    } else if (currentConfig.movingAverageWindowSize != lastAppliedWindowSize) {
+        Serial.printf("Filter window size changed from %u to %u. Resetting filter history.\n", 
+                      lastAppliedWindowSize, currentConfig.movingAverageWindowSize);
+        #if USE_MOVING_AVERAGE_FILTER
+        for (int i = 0; i < MAX_SENSORS_TOTAL; i++) {
+            tempFilterHistoryIndex[i] = 0;
+            for (int j = 0; j < MAX_MOVING_AVERAGE_WINDOW_SIZE; j++) {
+                tempFilterHistory[i][j] = -999.0f;
+            }
+        }
+        #endif
+        lastAppliedWindowSize = currentConfig.movingAverageWindowSize;
+    }
+
+    if (currentConfig.graphIntervalSeconds != lastAppliedGraphInterval) {
+        Serial.printf("Graph history interval changed from %lu to %lu seconds. Clearing history.\n", lastAppliedGraphInterval, currentConfig.graphIntervalSeconds);
+        for (int s = 0; s < MAX_SENSORS_TOTAL; s++) { for (int h = 0; h < HISTORY_SIZE; h++) { historyMaxTemps[s][h] = -200.0f; historyMinTemps[s][h] = 200.0f; }}
+        currentHistorySlot = 0; lastHistorySlotUpdateMillis = millis(); overallMax72h = -200.0f; overallMin72h = 200.0f;
+    }
+    HISTORY_INTERVAL_MS = (unsigned long)currentConfig.graphIntervalSeconds * 1000UL;
+    lastAppliedGraphInterval = currentConfig.graphIntervalSeconds;
+    Serial.printf("Graph history interval set to %lu ms (%lu seconds)\n", HISTORY_INTERVAL_MS, currentConfig.graphIntervalSeconds);
+
+    forceFullRedraw = true;
+    Serial.println(F("Live settings applied."));
+}
+
+void loadConfig() {
+    EEPROM.begin(EEPROM_SIZE);
+    EepromConfig tempCfg;
+    EEPROM.get(0, tempCfg);
+
+    if (tempCfg.magic == EEPROM_MAGIC_NUMBER && tempCfg.version == EEPROM_CONFIG_VERSION) {
+        Serial.println(F("Valid configuration found in EEPROM."));
+        currentConfig = tempCfg;
+    } else {
+        Serial.printf("No valid config (magic:0x%X ver:%d expected_ver:%d) in EEPROM or version mismatch. Loading defaults.\n", tempCfg.magic, tempCfg.version, EEPROM_CONFIG_VERSION);
+        setDefaultConfig(currentConfig);
+        Serial.println(F("Saving default config..."));
+        EEPROM.put(0, currentConfig);
+        if (!EEPROM.commit()) Serial.println(F("EEPROM commit failed after setting defaults!"));
+        Serial.println(F("Configuration reset to defaults. Rebooting..."));
+        delay(2000);
+        ESP.restart();
+    }
+    EEPROM.end();
+
+    applyConfig();
+}
+
+void saveConfig(bool rebootAfter) {
+    EEPROM.begin(EEPROM_SIZE);
+    currentConfig.magic = EEPROM_MAGIC_NUMBER; currentConfig.version = EEPROM_CONFIG_VERSION;
+    EEPROM.put(0, currentConfig);
+    bool commit_ok = EEPROM.commit();
+    EEPROM.end();
+
+    webServerMessage = commit_ok ? "Settings saved successfully!" : "Settings save FAILED!";
+
+    if (rebootAfter) {
+        tft.fillScreen(ST77XX_BLACK); tft.setTextColor(ST77XX_WHITE); tft.setTextSize(2);
+        tft.setCursor(20, 140); tft.println(F("Settings Saved!"));
+        tft.setCursor(20, 160); tft.println(F("Rebooting..."));
+        delay(3000);
+        ESP.restart();
+    }
+}
+
+// ======================= Color Conversion Helper =======================
+String rgb565ToHtmlColor(uint16_t color) {
+    uint8_t r = (color >> 11) & 0x1F;
+    uint8_t g = (color >> 5) & 0x3F;
+    uint8_t b = color & 0x1F;
+    r = (r * 255) / 31;
+    g = (g * 255) / 63;
+    b = (b * 255) / 31;
+    return Sprintf("#%02X%02X%02X", r, g, b);
+}
+
+
+// ======================= Uptime Formatting =======================
+String formatUptime(unsigned long ms) {
+    unsigned long seconds = ms / 1000, minutes = seconds / 60, hours = minutes / 60, days = minutes / 1440;
+    minutes %= 60; hours %= 24;
+    return Sprintf("%luD %02luH:%02luM:%02luS", days, hours, minutes, seconds % 60);
+}
+
+// ======================= Time Update =======================
+void handleTimeUpdate() {
+    if (!eth_connected && !wifiStaIsActive) {
+        if (timeIsSynchronized) {
+            timeIsSynchronized = false;
+            currentTimeString = "NTP No Conn";
+            prevTimeString = "";
+        }
+        return;
+    }
+
+    struct tm timeinfo;
+    if (getLocalTime(&timeinfo, 10)) { // 10ms timeout to avoid blocking
+        if (!timeIsSynchronized) {
+            Serial.println("System time synchronized via NTP for the first time.");
+            timeIsSynchronized = true;
+        }
+        char timeStringBuff[10];
+        strftime(timeStringBuff, sizeof(timeStringBuff), "%H:%M:%S", &timeinfo);
+        currentTimeString = String(timeStringBuff);
+    } else {
+        if (timeIsSynchronized) {
+            // Don't mark as unsynced
+        }
+        currentTimeString = "Syncing...";
+    }
+}
+
+
+// ======================= Setup =======================
+void setup() {
+    Serial.begin(115200);
+    delay(2000);
+    Serial.printf("\n--- Starting Setup (Firmware: %s) ---\n", FW_VERSION);
+
+    esp_read_mac(device_mac, ESP_MAC_WIFI_STA);
+    char macStr[18];
+    sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X", device_mac[0], device_mac[1], device_mac[2], device_mac[3], device_mac[4], device_mac[5]);
+    Serial.printf("Base device MAC (from Wi-Fi STA): %s\n", macStr);
+    
+    esp_base_mac_addr_set(device_mac);
+    Serial.println("Base MAC for the chip has been set.");
+
+    pinMode(LED_GREEN_GPIO, OUTPUT); digitalWrite(LED_GREEN_GPIO, LOW);
+    pinMode(LED_RED_GPIO, OUTPUT); digitalWrite(LED_RED_GPIO, LOW);
+    
+    Serial.println("Initializing Display SPI (HSPI)...");
+    spiTFT.begin(TFT_SCLK_GPIO, TFT_MISO_GPIO, TFT_MOSI_GPIO, -1);
+    
+    tft.init(TFT_WIDTH_ST7789, TFT_HEIGHT_ST7789); 
+    tft.setRotation(2); 
+    tft.fillScreen(ST77XX_BLACK); tft.setTextColor(ST77XX_WHITE);
+    tft.setTextSize(2); tft.setCursor(10, 10); tft.print(F("Booting...")); tft.setTextSize(1);
+    tft.writeCommand(ST77XX_DISPON);
+
+    tft.setCursor(10, 30); tft.print(F("Loading Config... ")); 
+    loadConfig(); 
+    tft.print(F("OK"));
+    Serial.printf("Config loaded. Free Heap: %lu\n", ESP.getFreeHeap());
+
+    initializeNetwork();
+    
+    tft.setCursor(10, 90); tft.print(F("Sensor Init... "));
+    for (int i = 0; i < NUM_DS18B20_BUSES; i++) {
+        sensors[i].setOneWire(&oneWire[i]); sensors[i].begin();
+        sensors[i].setResolution(12);
+        sensors[i].setWaitForConversion(false); detectedSensorCount[i] = 0;
+    }
+    autoDetectDs18b20(); tft.print(F("Found: ")); tft.print(totalDetectedSensors);
+    for (int i = 0; i < MAX_SENSORS_TOTAL; i++) { currentTemperatures[i] = -999.0; prevTemperatures[i] = -1000.0; }
+    for (int i = 0; i < GRAPH_SENSORS_TO_PLOT; i++) prevTemperaturesForGraph[i] = -1000.0;
+    
+    currentHistorySlot = 0; lastHistorySlotUpdateMillis = millis();
+
+    #if USE_MOVING_AVERAGE_FILTER
+      Serial.println(F("Initializing moving average filter..."));
+      for (int i = 0; i < MAX_SENSORS_TOTAL; i++) {
+        tempFilterHistoryIndex[i] = 0;
+        for (int j = 0; j < MAX_MOVING_AVERAGE_WINDOW_SIZE; j++) tempFilterHistory[i][j] = -999.0f;
+      }
+    #endif
+
+    tft.setCursor(10, 105); tft.print(F("Web Srv Init... "));
+    setupWebServer();
+    tft.print(F("OK"));
+
+    tft.setCursor(10, 120); tft.print(F("mDNS Init... "));
+    if (eth_connected || wifiStaIsActive) {
+        String mdnsName = String(currentConfig.deviceName);
+        mdnsName.replace(" ", "-");
+        if (MDNS.begin(mdnsName.c_str())) {
+            MDNS.addService("http", "tcp", 80);
+            Serial.printf("mDNS responder started: %s.local\n", mdnsName.c_str());
+            tft.print(F("OK"));
+        } else {
+            Serial.println("Error setting up MDNS responder!");
+            tft.print(F("Fail!"));
+        }
+    } else {
+        tft.print(F("Skipped"));
+    }
+
+    forceFullRedraw = true;
+
+    Serial.printf("--- Setup complete. Final Free Heap: %lu\n", ESP.getFreeHeap());
+    delay(2000); 
+}
+
+
+// ======================= Loop =======================
+void loop() {
+  unsigned long currentMillis = millis();
+
+  if (alarmActive) { digitalWrite(LED_GREEN_GPIO, LOW); digitalWrite(LED_RED_GPIO, HIGH); }
+  else {
+    digitalWrite(LED_RED_GPIO, LOW);
+    bool blink_state = (eth_connected || wifiStaIsActive) ? (currentMillis % 2000) < 1000 : (currentMillis % 334) < 167;
+    digitalWrite(LED_GREEN_GPIO, blink_state ? HIGH : LOW);
+  }
+  
+  if (isOtaUpdating) {
+    webServer.handleClient();
+    delay(10);
+    return;
+  }
+  
+  handleNetworkMaintenance();
+  webServer.handleClient();
+  if (apModeIsActive) dnsServer.processNextRequest();
+
+  handleTimeUpdate();
+  handleTemperatureReading();
+  updateHistoryData();
+
+  if (currentMillis - lastMaxTempCalcTime >= maxTempCalcInterval || forceFullRedraw) {
+    lastMaxTempCalcTime = currentMillis; 
+    calculateOverallMinMaxTemperatures();
+  }
+
+  handleRemoteDataSend();
+  handleNarodmonSend();
+
+  if (currentMillis - lastSerialPrintTime >= serialPrintInterval) {
+    lastSerialPrintTime = currentMillis; 
+    printTemperatureDataToSerial(); 
+  }
+
+  if ((currentMillis - lastDisplayUpdateTime >= displayUpdateInterval) || forceFullRedraw) {
+    lastDisplayUpdateTime = currentMillis; 
+    updateDynamicInfoOnDisplay(); 
+    if (forceFullRedraw) forceFullRedraw = false;
+  }
+
+  if (currentMillis - lastSensorDetectTime >= sensorDetectInterval) { 
+      lastSensorDetectTime = currentMillis; 
+      autoDetectDs18b20(); 
+  }
+}
+
+// ======================= Network Event Handler =======================
+void WiFiEvent(WiFiEvent_t event) {
+  switch (event) {
+    case ARDUINO_EVENT_ETH_START:
+      Serial.println("ETH Started"); networkStatusString = "Eth Starting";
+      break;
+    case ARDUINO_EVENT_ETH_CONNECTED:
+      Serial.println("ETH Connected"); networkStatusString = "Eth Connected";
+      break;
+    case ARDUINO_EVENT_ETH_GOT_IP:
+      Serial.printf("ETH MAC: %s, IPv4: %s\n", ETH.macAddress().c_str(), ETH.localIP().toString().c_str());
+      networkStatusString = "Eth: " + ETH.localIP().toString();
+      eth_connected = true;
+      if (wifiStaIsActive || apModeIsActive) {
+          Serial.println("Ethernet connection established. Disabling WiFi module.");
+          WiFi.mode(WIFI_OFF);
+          wifiStaIsActive = false; apModeIsActive = false;
+      }
+      forceFullRedraw = true;
+      break;
+    case ARDUINO_EVENT_ETH_DISCONNECTED:
+      Serial.println("ETH Disconnected");
+      networkStatusString = "Eth Disconnected";
+      eth_connected = false; timeIsSynchronized = false; forceFullRedraw = true;
+      break;
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+        Serial.printf("WiFi STA Got IP: %s, MAC: %s\n", WiFi.localIP().toString().c_str(), WiFi.macAddress().c_str());
+        wifiStaIsActive = true;
+        networkStatusString = "WiFi: " + WiFi.localIP().toString();
+        forceFullRedraw = true;
+        break;
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+        Serial.println("WiFi STA Disconnected");
+        wifiStaIsActive = false; networkStatusString = "WiFi D/C";
+        forceFullRedraw = true;
+        break;
+    default:
+      break;
+  }
+}
+
+// ======================= Network Initialization & Maintenance =======================
+void logAndDisplayNetworkStatus(int y_pos, const char* label, bool success, const char* statusMsg) {
+    tft.setCursor(10, y_pos); tft.print(label);
+    Serial.printf("Network Init: %s... ", label);
+    if (success) { tft.setTextColor(ST77XX_GREEN); tft.print(F("OK.")); Serial.printf("OK. %s\n", statusMsg); }
+    else { tft.setTextColor(ST77XX_ORANGE); tft.print(F("Fail/Skip")); Serial.printf("Fail/Skip. %s\n", statusMsg); }
+    tft.setTextColor(ST77XX_WHITE);
+}
+
+void initializeNetwork() {
+    WiFi.onEvent(WiFiEvent);
+    
+    tft.setCursor(10, 45); tft.print(F("Ethernet Init..."));
+    Serial.println(F("Attempting Ethernet connection (priority)..."));
+    
+    ETH.begin(ETH_PHY_W5500, -1, ETH_CS_GPIO, ETH_INT_GPIO, ETH_RST_GPIO, SPI2_HOST, ETH_SCLK_GPIO, ETH_MISO_GPIO, ETH_MOSI_GPIO);
+    if (currentConfig.staticIP != IPAddress(0,0,0,0)) {
+        ETH.config(currentConfig.staticIP, currentConfig.gateway, currentConfig.subnet, currentConfig.dnsServer);
+    }
+    
+    unsigned long start_eth_wait = millis();
+    while(!eth_connected && (millis() - start_eth_wait < 8000)) delay(100);
+
+    if (eth_connected) {
+        logAndDisplayNetworkStatus(45, "Ethernet Init", true, ("Eth: " + ETH.localIP().toString()).c_str());
+        Serial.println("Ethernet is primary. WiFi will be disabled.");
+        WiFi.mode(WIFI_OFF);
+        return;
+    } 
+    
+    logAndDisplayNetworkStatus(45, "Ethernet Init", false, "Failed or unavailable. Trying WiFi...");
+    ETH.end(); 
+
+    bool isStaConfigured = currentConfig.wifiEnabled && currentConfig.wifiMode == CFG_WIFI_MODE_STA && strlen(currentConfig.wifiSsid) > 0 && String(currentConfig.wifiSsid) != "YourNetworkSSID";
+    if (isStaConfigured) {
+        Serial.printf("Attempting WiFi STA connect to: %s\n", currentConfig.wifiSsid);
+        WiFi.mode(WIFI_STA);
+        if (currentConfig.staticIP != IPAddress(0,0,0,0)) {
+             WiFi.config(currentConfig.staticIP, currentConfig.gateway, currentConfig.subnet, currentConfig.dnsServer);
+        }
+        WiFi.begin(currentConfig.wifiSsid, currentConfig.wifiPassword);
+        
+        unsigned long wifi_start_time = millis();
+        tft.setCursor(10, 60); tft.print(F("WiFi STA Init..."));
+        while (WiFi.status() != WL_CONNECTED && (millis() - wifi_start_time < 20000)) {
+            delay(500); Serial.print(".");
+        }
+        Serial.println();
+
+        if (WiFi.status() == WL_CONNECTED) {
+            wifiStaIsActive = true;
+            logAndDisplayNetworkStatus(60, "WiFi STA Init", true, ("WiFi: " + WiFi.localIP().toString()).c_str());
+            return;
+        }
+    }
+
+    logAndDisplayNetworkStatus(60, "WiFi STA Init", false, "Not configured or failed.");
+    Serial.printf("Falling back to WiFi AP Mode: %s\n", currentConfig.wifiApSsid);
+    
+    apModeIsActive = true;
+    WiFi.mode(WIFI_AP);
+    IPAddress apIP(192, 168, 4, 1);
+    WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
+    WiFi.softAP(currentConfig.wifiApSsid, strlen(currentConfig.wifiApPassword) > 0 ? currentConfig.wifiApPassword : NULL);
+    delay(500);
+    
+    dnsServer.start(DNS_PORT, "*", apIP);
+    networkStatusString = "AP: " + WiFi.softAPIP().toString();
+    logAndDisplayNetworkStatus(75, "AP Mode Init", true, networkStatusString.c_str());
+}
+
+void handleNetworkMaintenance() {
+    if (wifiStaIsActive && WiFi.status() != WL_CONNECTED) {
+        Serial.println("WiFi connection lost. Reconnecting...");
+        networkStatusString = "WiFi Reconnecting...";
+        WiFi.reconnect();
+    }
+}
+
+
+// ======================= DS18B20 Functions =======================
+String deviceAddressToString(const DeviceAddress deviceAddress) {
+  return Sprintf("%02X%02X%02X%02X%02X%02X%02X%02X",
+          deviceAddress[0], deviceAddress[1], deviceAddress[2], deviceAddress[3],
+          deviceAddress[4], deviceAddress[5], deviceAddress[6], deviceAddress[7]);
+}
+
+void autoDetectDs18b20() {
+  int oldTotalDetectedSensors = totalDetectedSensors; totalDetectedSensors = 0;
+  DeviceAddress tempAddress;
+
+  for (int b = 0; b < NUM_DS18B20_BUSES; b++) {
+    oneWire[b].reset_search();
+    int sensorsOnThisBus = 0;
+    while (sensorsOnThisBus < MAX_SENSORS_PER_BUS && oneWire[b].search(tempAddress)) {
+        if (totalDetectedSensors >= MAX_SENSORS_TOTAL) break;
+        if (tempAddress[0] == 0x28) { // Only standard 1-wire temp sensors
+            memcpy(tempSensorAddresses[totalDetectedSensors], tempAddress, 8);
+            sensorsOnThisBus++;
+            totalDetectedSensors++;
+        }
+    }
+    detectedSensorCount[b] = sensorsOnThisBus;
+  }
+
+  if (oldTotalDetectedSensors != totalDetectedSensors) {
+    forceFullRedraw = true;
+    for (int i = 0; i < MAX_SENSORS_TOTAL; i++) prevTemperatures[i] = -1000.0;
+    for (int i = 0; i < GRAPH_SENSORS_TO_PLOT; i++) prevTemperaturesForGraph[i] = -1000.0;
+  }
+}
+
+void handleTemperatureReading() {
+  unsigned long currentMillis = millis();
+  if (!conversionStarted && (currentMillis - lastTempRequestTime >= tempRequestInterval)) {
+    if (totalDetectedSensors > 0) {
+      for (int b = 0; b < NUM_DS18B20_BUSES; b++) { 
+        if (detectedSensorCount[b] > 0) sensors[b].requestTemperatures(); 
+      }
+      lastTempRequestTime = currentMillis; 
+      conversionStarted = true;
+    } else {
+        for (int i = 0; i < MAX_SENSORS_TOTAL; i++){ 
+            if (currentTemperatures[i] != -999.0) currentTemperatures[i] = -999.0; 
+        }
+        conversionStarted = false;
+    }
+  }
+  else if (conversionStarted && (currentMillis - lastTempRequestTime >= DS18B20_CONVERSION_TIME_MS)) {
+    int sensorOverallIndex = 0; 
+
+    for (int b = 0; b < NUM_DS18B20_BUSES; b++) {
+      for (int i = 0; i < detectedSensorCount[b]; i++) {
+        if (sensorOverallIndex < totalDetectedSensors) {
+            float rawTempC = sensors[b].getTempC(tempSensorAddresses[sensorOverallIndex]);
+
+            if (rawTempC == DEVICE_DISCONNECTED_C || rawTempC == -127.0f) {
+                for (int j = 0; j < MAX_MOVING_AVERAGE_WINDOW_SIZE; j++) {
+                    tempFilterHistory[sensorOverallIndex][j] = -999.0f;
+                }
+                currentTemperatures[sensorOverallIndex] = -999.0;
+            } else {
+                #if USE_MOVING_AVERAGE_FILTER
+                  uint8_t windowSize = constrain(currentConfig.movingAverageWindowSize, 1, MAX_MOVING_AVERAGE_WINDOW_SIZE);
+                  tempFilterHistory[sensorOverallIndex][tempFilterHistoryIndex[sensorOverallIndex]] = rawTempC;
+                  tempFilterHistoryIndex[sensorOverallIndex] = (tempFilterHistoryIndex[sensorOverallIndex] + 1) % windowSize;
+                  
+                  float tempSum = 0;
+                  int validReadingsCount = 0;
+                  for (int j = 0; j < windowSize; j++) {
+                    float historyVal = tempFilterHistory[sensorOverallIndex][j];
+                    if (historyVal > -127.0f && historyVal != 85.0f) { // More robust check
+                      tempSum += historyVal;
+                      validReadingsCount++;
+                    }
+                  }
+                  float finalTemp;
+                  if (validReadingsCount > 0) {
+                      float averageRawTemp = tempSum / validReadingsCount;
+                      finalTemp = roundf((averageRawTemp + tempCalibration[sensorOverallIndex]) * 10.0f) / 10.0f;
+                  } else if (rawTempC == 85.0f) {
+                      finalTemp = 85.0f;
+                  } else {
+                      finalTemp = -999.0f;
+                  }
+                  currentTemperatures[sensorOverallIndex] = finalTemp;
+                #else
+                  bool isLikely85C_raw = (abs(rawTempC - 85.0f)<0.01f);
+                  if (isLikely85C_raw && abs(tempCalibration[sensorOverallIndex]) < 0.01f) {
+                    currentTemperatures[sensorOverallIndex] = 85.0f;
+                  } else {
+                    currentTemperatures[sensorOverallIndex] = roundf((rawTempC + tempCalibration[sensorOverallIndex]) * 10.0f) / 10.0f;
+                  }
+                #endif
+            }
+        }
+        sensorOverallIndex++;
+      }
+    }
+    
+    // Alarm logic with Hysteresis
+    bool should_be_alarming = false;
+    for (int i = 0; i < totalDetectedSensors; i++) {
+        float temp = currentTemperatures[i];
+        if (temp > -127.0f && temp != 85.0f && temp >= alarmTemperatureThreshold_op) {
+            should_be_alarming = true;
+            break;
+        }
+    }
+
+    if (should_be_alarming) {
+        alarmActive = true;
+    } else if (alarmActive) {
+        bool can_deactivate = true;
+        for (int i = 0; i < totalDetectedSensors; i++) {
+            float temp = currentTemperatures[i];
+            if (temp > -127.0f && temp != 85.0f && temp >= (alarmTemperatureThreshold_op - ALARM_HYSTERESIS_C)) {
+                can_deactivate = false;
+                break;
+            }
+        }
+        if (can_deactivate) alarmActive = false;
+    }
+    
+    if (alarmActive && !pduCommandSent) { sendPduCommand(); pduCommandSent = true; }
+    else if (!alarmActive && pduCommandSent) { pduCommandSent = false; }
+
+    for (int i = totalDetectedSensors; i < MAX_SENSORS_TOTAL; i++) { 
+      if (currentTemperatures[i] != -999.0) currentTemperatures[i] = -999.0; 
+    }
+    conversionStarted = false;
+  }
+}
+
+void printTemperatureDataToSerial() {
+    Serial.printf("T:%lu | Up:%s | Sens:%d | NTP: %s | Net: %s | Alarm:%s | Min/Max Hist: ",
+        millis(), formatUptime(millis()).c_str(), totalDetectedSensors,
+        timeIsSynchronized ? currentTimeString.c_str() : "Sync...",
+        networkStatusString.c_str(), alarmActive ? "ON" : "OFF" );
+    Serial.printf(overallMin72h < 199.0f ? "%.1f/" : "N/A/", overallMin72h);
+    Serial.printf(overallMax72h > -199.0f ? "%.1fC | " : "N/AC | ", overallMax72h);
+    Serial.printf("Heap: %.1fKB | ", (float)ESP.getFreeHeap()/1024.0f);
+    if (totalDetectedSensors == 0) Serial.println(F("No sensors."));
+    else {
+        for (int i = 0; i < totalDetectedSensors; i++) {
+            Serial.printf("S%d", i + 1);
+            if (currentTemperatures[i] <= -127.0) Serial.print(":N/A");
+            else if (currentTemperatures[i] == 85.0f && abs(tempCalibration[i])<0.01f) Serial.print(":85.0?");
+            else Serial.printf(":%.1fC", currentTemperatures[i]);
+            if (i < totalDetectedSensors - 1) Serial.print(F(" | "));
+        }
+        Serial.println();
+    }
+}
+
+void sendPduCommand() {
+    Serial.printf("ALARM! Sending command '%s' to PDU at %s\n", currentPduCommand, currentPduIPString);
+    IPAddress pduIP;
+    if (!pduIP.fromString(currentPduIPString) || pduIP == IPAddress(0,0,0,0) || strlen(currentPduCommand) == 0) {
+        Serial.println(F("PDU command skipped: Invalid IP or empty command.")); 
+        return; 
+    }
+    if (!eth_connected && !wifiStaIsActive) {
+        Serial.println(F("PDU command skipped: No network connection.")); 
+        return;
+    }
+
+    WiFiClient pduClient;
+    if (pduClient.connect(pduIP, 80)) {
+        pduClient.printf("GET /?%s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", currentPduCommand, currentPduIPString);
+        pduClient.stop();
+    } else {
+        Serial.println(F("PDU command failed: Could not connect to PDU."));
+    }
+}
+
+void handleRemoteDataSend() {
+    if (!currentRemoteSendEnabled) {
+
+        lastRemoteSendStatus = RSS_DISABLED;
+        return;
+    }
+    
+    if (currentRemoteSendIntervalSec == 0 || millis() - lastRemoteSendTime < (currentRemoteSendIntervalSec * 1000UL)) return;
+    
+    lastRemoteSendTime = millis();
+    lastRemoteSendStatus = RSS_PENDING;
+
+
+    IPAddress serverIP;
+    if (!serverIP.fromString(currentRemoteServerIP) || serverIP == IPAddress(0,0,0,0) || (!eth_connected && !wifiStaIsActive)) {
+        if (currentRemoteSendEnabled) Serial.println("Remote send skipped: No network or invalid server IP.");
+        lastRemoteSendStatus = RSS_FAIL;
+        return;
+    }
+
+    WiFiClient dataClient;
+  uint16_t serverPort = currentConfig.remoteServerPort;
+
+    if (dataClient.connect(serverIP, serverPort)) {
+        char payload_buffer[2048]; 
+        int offset = 0;
+        
+        const char* network_type_str = eth_connected ? "ethernet" : (wifiStaIsActive ? "wifi" : "unknown");
+        String ip_address_str = eth_connected ? ETH.localIP().toString() : (wifiStaIsActive ? WiFi.localIP().toString() : "N/A");
+        char mac_str[18];
+        sprintf(mac_str, "%02X:%02X:%02X:%02X:%02X:%02X", device_mac[0], device_mac[1], device_mac[2], device_mac[3], device_mac[4], device_mac[5]);
+
+        time_t now_utc = timeIsSynchronized ? time(nullptr) : 0;
+        
+        String safeDeviceName = String(currentConfig.deviceName);
+        safeDeviceName.replace("\"", "\\\""); safeDeviceName.replace("\\", "\\\\");
+        char alarm_thresh_str[8]; dtostrf(currentConfig.alarmTemp, 4, 1, alarm_thresh_str);
+        
+        offset = snprintf(payload_buffer, sizeof(payload_buffer), "{"
+            "\"protocol_version\":\"2.1\",\"deviceId\":\"%s\",\"deviceName\":\"%s\",\"firmware_version\":\"%s\","
+            "\"timestamp_utc\":%lu,\"uptime_ms\":%lu,\"geo\":{\"lat\":%.4f,\"lon\":%.4f},"
+            "\"status\":{\"alarm_active\":%s,\"alarm_threshold_c\":%s,\"network\":\"%s\",\"ip_address\":\"%s\"},"
+            "\"sensors\":[",
+            mac_str, safeDeviceName.c_str(), FW_VERSION,
+            (unsigned long)now_utc, millis(), currentConfig.geoLat, currentConfig.geoLon,
+            alarmActive ? "true" : "false", alarm_thresh_str, network_type_str, ip_address_str.c_str() );
+
+        bool firstSensor = true;
+        for (int i = 0; i < totalDetectedSensors; i++) {
+            if (currentTemperatures[i] > -127.0f && currentTemperatures[i] != 85.0f) {
+                if (!firstSensor) offset += snprintf(payload_buffer + offset, sizeof(payload_buffer) - offset, ",");
+                
+                char temp_str[8]; dtostrf(currentTemperatures[i], 4, 1, temp_str);
+                String safeSensorName = String(currentConfig.sensorNames[i]);
+                safeSensorName.replace("\"", "\\\""); safeSensorName.replace("\\", "\\\\");
+                if (safeSensorName.length() == 0) safeSensorName = Sprintf("Sensor %d", i);
+
+                offset += snprintf(payload_buffer + offset, sizeof(payload_buffer) - offset, 
+                    "{\"id\":%d,\"name\":\"%s\",\"data\":{\"temperature_c\":%s}}", i, safeSensorName.c_str(), temp_str);
+                firstSensor = false;
+            }
+        }
+        offset += snprintf(payload_buffer + offset, sizeof(payload_buffer) - offset, "]}");
+        
+        dataClient.printf("POST / HTTP/1.1\r\nHost: %s\r\nUser-Agent: %s/%s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n", 
+            currentRemoteServerIP, currentConfig.deviceName, FW_VERSION, (int)strlen(payload_buffer));
+        dataClient.print(payload_buffer);
+        dataClient.stop();
+        lastRemoteSendStatus = RSS_OK;
+        Serial.printf("Sent remote data packet (v2.1 format) to %s:%u.\n", serverIP.toString().c_str(), serverPort);
+    } else {
+        lastRemoteSendStatus = RSS_FAIL;
+        Serial.printf("Remote data send failed: Could not connect to server at %s:%u.\n", serverIP.toString().c_str(), serverPort);
+    }
+}
+
+void handleNarodmonSend() {
+    if (!currentNarodmonSendEnabled_op || currentNarodmonSendIntervalSec_op < 240 || millis() - lastNarodmonSendTime < (currentNarodmonSendIntervalSec_op * 1000UL)) return;
+    lastNarodmonSendTime = millis();
+
+    if (!eth_connected && !wifiStaIsActive) {
+        Serial.println(F("Narodmon: Send skipped, no network.")); return;
+    }
+    char macFormatted[13] = {0}; int j = 0;
+    for (int i = 0; currentNarodmonMac_op[i] != '\0' && j < 12; i++) { if (isxdigit(currentNarodmonMac_op[i])) { if (currentNarodmonMac_op[i] != ':') macFormatted[j++] = toupper(currentNarodmonMac_op[i]); } }
+    if (j != 12) { Serial.println(F("Narodmon: MAC address invalid.")); return; }
+    
+    WiFiClient narodmonClient;
+    const char* narodmonHost = "narodmon.ru";
+
+    if (narodmonClient.connect(narodmonHost, 8283)) {
+        Serial.printf("Narodmon: Connected to %s. Sending data.\n", narodmonHost);
+        narodmonClient.printf("#%s", macFormatted); int sensorsInPayload = 0;
+        for (int i = 0; i < totalDetectedSensors; i++) {
+            if (strlen(currentNarodmonSensorIDs_op[i]) > 0) {
+                float temp = currentTemperatures[i];
+                if (temp > -127.0f && temp != 85.0f) {
+                    char tempStr[8]; dtostrf(temp, 4, 1, tempStr);
+                    narodmonClient.printf("#%s#%s", currentNarodmonSensorIDs_op[i], tempStr);
+                    if (strlen(currentConfig.sensorNames[i]) > 0) narodmonClient.printf("#%s", currentConfig.sensorNames[i]);
+                    sensorsInPayload++;
+                }
+            }
+        }
+        if (sensorsInPayload > 0) narodmonClient.println("#DONE");
+        narodmonClient.stop();
+    } else {
+        Serial.printf("Narodmon: Failed to connect to %s.\n", narodmonHost);
+    }
+}
+
+void updateStaticInfoOnDisplay() {
+  tft.fillScreen(ST77XX_BLACK); tft.setTextColor(ST77XX_WHITE); tft.setTextWrap(false); tft.setTextSize(1);
+  long currentHeap = ESP.getFreeHeap();
+  char heapBuf[15];
+  sprintf(heapBuf, "Heap: %.1f KB", (float)currentHeap / 1024.0f);
+  tft.setCursor(0, 0); tft.print(F("Heap:"));
+  tft.print(heapBuf);
+  tft.setCursor(180, 0); tft.print(FW_VERSION);
+  // Dev IP removed as requested
+  // PDU label moved below
+  if (totalDetectedSensors == 0) {
+    tft.setTextSize(2); tft.setTextColor(ST77XX_ORANGE);    
+    int16_t x1_ns, y1_ns; uint16_t w_ns, h_ns; tft.getTextBounds("No Sensors", 0, 0, &x1_ns, &y1_ns, &w_ns, &h_ns);
+    tft.setCursor((TFT_WIDTH_ST7789 - w_ns) / 2, SENSOR_BOX_Y_START + (SENSOR_BOX_HEIGHT - h_ns) / 2); tft.print(F("No Sensors"));
+  } else {
+    tft.setTextSize(1); tft.setTextColor(ST77XX_WHITE);
+    int current_box_x = SENSOR_BOX_SPACING / 2;
+    for (int i = 0; i < min(totalDetectedSensors, MAX_DISPLAY_SENSOR_BOXES); i++) {
+      tft.drawRect(current_box_x, SENSOR_BOX_Y_START, SENSOR_BOX_WIDTH, SENSOR_BOX_HEIGHT, ST77XX_WHITE);
+      char label_S[3]; sprintf(label_S, "S%d", i + 1);
+      int16_t x1_s, y1_s; uint16_t w_s, h_s; tft.getTextBounds(label_S, 0, 0, &x1_s, &y1_s, &w_s, &h_s);
+      tft.setCursor(current_box_x + (SENSOR_BOX_WIDTH - w_s) / 2, SENSOR_BOX_Y_START + SENSOR_BOX_LABEL_Y_OFFSET); tft.print(label_S);
+      current_box_x += SENSOR_BOX_WIDTH + SENSOR_BOX_SPACING;
+    }
+  }
+  tft.setTextSize(1); tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(0, INFO_LINES_Y_START); tft.print(F("Time:"));
+  tft.setCursor(0, INFO_LINES_Y_START + INFO_LINE_HEIGHT); tft.print(F("Network:"));
+  tft.setCursor(0, INFO_LINES_Y_START + 2 * INFO_LINE_HEIGHT); tft.print(F("Alarm T:"));
+  tft.setCursor(0, INFO_LINES_Y_START + 3 * INFO_LINE_HEIGHT); tft.print(F("Uptime:"));
+  tft.setCursor(0, REMOTE_INFO_LINE_Y); tft.print(F("Remote:"));
+  tft.setCursor(0, INFO_LINES_Y_START + 5 * INFO_LINE_HEIGHT); tft.print(F("PDU:"));
+
+  int graphAreaBorderHeight = (TFT_HEIGHT_ST7789 - (INFO_LINE_HEIGHT + 2)) - GRAPH_AREA_Y_START;
+  tft.drawRect(GRAPH_BORDER_X, GRAPH_AREA_Y_START, GRAPH_BORDER_W, graphAreaBorderHeight, ST77XX_BLUE);
+  
+
+  prevPduInfoOnDisplay = ""; prevTimeString = ""; prevNetworkStatusDisplay = "";
+  prevAlarmTempString = ""; prevUptimeString = ""; prevHeap = 0;
+  for(int i=0; i < MAX_SENSORS_TOTAL; ++i) prevTemperatures[i] = -1000.0f;
+  for(int i=0; i < GRAPH_SENSORS_TO_PLOT; ++i) prevTemperaturesForGraph[i] = -1000.0;
+}
+
+// Вспомогательная функция для обновления текстовых полей на дисплее
+void updateTftField(String& prevValue, const String& newValue, int x, int y, int w, int h, uint16_t fgColor, uint16_t bgColor, int textSize) {
+    if (newValue != prevValue || forceFullRedraw) {
+        tft.fillRect(x, y, w, h, bgColor);
+        tft.setTextColor(fgColor, bgColor);
+        tft.setTextSize(textSize);
+        tft.setCursor(x, y);
+        tft.print(newValue);
+        prevValue = newValue;
+    }
+}
+
+void updateDynamicInfoOnDisplay() {
+  if (forceFullRedraw) updateStaticInfoOnDisplay();
+  
+  int16_t x1_pdu_lbl, y1_pdu_lbl; uint16_t w_pdu_lbl, h_pdu_lbl; tft.setTextSize(1);
+  tft.getTextBounds("PDU: ", 0, 0, &x1_pdu_lbl, &y1_pdu_lbl, &w_pdu_lbl, &h_pdu_lbl);
+  int pduValueDisplayX = w_pdu_lbl;
+  String pduInfoOnDisplay = String(currentPduIPString) + " CMD: " + (strlen(currentPduCommand) > 0 ? (strlen(currentPduCommand) > PDU_INFO_MAX_CMD_DISPLAY_LEN ? String(currentPduCommand).substring(0,PDU_INFO_MAX_CMD_DISPLAY_LEN) + "..." : String(currentPduCommand)) : "(none)");
+  updateTftField(prevPduInfoOnDisplay, pduInfoOnDisplay, pduValueDisplayX, INFO_LINES_Y_START + 5 * INFO_LINE_HEIGHT, TFT_WIDTH_ST7789 - pduValueDisplayX, INFO_LINE_HEIGHT - 1, ST77XX_WHITE, ST77XX_BLACK, 1);
+
+  if (totalDetectedSensors > 0) {
+    int current_val_box_x = SENSOR_BOX_SPACING / 2;    
+    for (int i = 0; i < min(totalDetectedSensors, MAX_DISPLAY_SENSOR_BOXES); i++) {
+        if (abs(currentTemperatures[i] - prevTemperatures[i]) > 0.05 || (currentTemperatures[i] <= -127.0f) != (prevTemperatures[i] <= -127.0f) || forceFullRedraw) {
+            tft.fillRect(current_val_box_x + 1, SENSOR_BOX_Y_START + SENSOR_BOX_VALUE_Y_OFFSET - 2, SENSOR_BOX_WIDTH - 2, SENSOR_BOX_HEIGHT - (SENSOR_BOX_VALUE_Y_OFFSET-2) -1, ST77XX_BLACK);
+            char tempDispStr[10]; uint16_t tempColor;
+            if (currentTemperatures[i] <= -127.0f) { strcpy(tempDispStr, "N/A"); tempColor = ST77XX_RED; }
+            else if (currentTemperatures[i] == 85.0f) { strcpy(tempDispStr, "85.0?"); tempColor = ST77XX_ORANGE; }
+            else {
+                dtostrf(currentTemperatures[i], 3, 1, tempDispStr);
+                if (currentTemperatures[i] >= alarmTemperatureThreshold_op) tempColor = ST77XX_MAGENTA;
+                else if (currentTemperatures[i] >= currentConfig.graphTempThresholds[2]) tempColor = currentConfig.graphTempColors[3];
+                else if (currentTemperatures[i] >= currentConfig.graphTempThresholds[1]) tempColor = currentConfig.graphTempColors[2];
+                else if (currentTemperatures[i] >= currentConfig.graphTempThresholds[0]) tempColor = currentConfig.graphTempColors[1];
+                else tempColor = currentConfig.graphTempColors[0];
+            }
+            tft.setTextSize(2); tft.setTextColor(tempColor);
+            int16_t x1, y1; uint16_t w, h; tft.getTextBounds(tempDispStr, 0, 0, &x1, &y1, &w, &h);
+            tft.setCursor(current_val_box_x + (SENSOR_BOX_WIDTH - w)/2, SENSOR_BOX_Y_START + SENSOR_BOX_VALUE_Y_OFFSET); tft.print(tempDispStr);
+            prevTemperatures[i] = currentTemperatures[i];
+        }
+        current_val_box_x += SENSOR_BOX_WIDTH + SENSOR_BOX_SPACING;
+    }
+  }
+  
+  updateTftField(prevTimeString, currentTimeString, INFO_VALUE_X_OFFSET, INFO_LINES_Y_START, TFT_WIDTH_ST7789 - INFO_VALUE_X_OFFSET, INFO_LINE_HEIGHT - 1, ST77XX_WHITE, ST77XX_BLACK, 1);
+  updateTftField(prevNetworkStatusDisplay, networkStatusString, INFO_VALUE_X_OFFSET, INFO_LINES_Y_START + INFO_LINE_HEIGHT, TFT_WIDTH_ST7789 - INFO_VALUE_X_OFFSET, INFO_LINE_HEIGHT - 1, (eth_connected || wifiStaIsActive) ? ST77XX_GREEN : ST77XX_ORANGE, ST77XX_BLACK, 1);
+  char alarmTempBuf[8]; dtostrf(alarmTemperatureThreshold_op, 3, 1, alarmTempBuf); strcat(alarmTempBuf, "C");
+  updateTftField(prevAlarmTempString, String(alarmTempBuf), INFO_VALUE_X_OFFSET, INFO_LINES_Y_START + 2 * INFO_LINE_HEIGHT, TFT_WIDTH_ST7789 - INFO_VALUE_X_OFFSET, INFO_LINE_HEIGHT - 1, ST77XX_WHITE, ST77XX_BLACK, 1);
+  updateTftField(prevUptimeString, formatUptime(millis()), INFO_VALUE_X_OFFSET, INFO_LINES_Y_START + 3 * INFO_LINE_HEIGHT, TFT_WIDTH_ST7789 - INFO_VALUE_X_OFFSET, INFO_LINE_HEIGHT - 1, ST77XX_WHITE, ST77XX_BLACK, 1);
+
+  String remoteInfoStr, prevRemoteSendInfoString; 
+  if (lastRemoteSendStatus == RSS_DISABLED) {
+      remoteInfoStr = "Disabled";
+  } else {
+      long countdown_s = -1;
+      unsigned long interval_ms = (unsigned long)currentConfig.remoteSendIntervalSec * 1000UL;
+      if (interval_ms > 0 && millis() >= lastRemoteSendTime) {
+          unsigned long elapsed_ms = millis() - lastRemoteSendTime;
+          if (elapsed_ms < interval_ms) countdown_s = (interval_ms - elapsed_ms) / 1000;
+      }
+      String ip_display = (String(currentConfig.remoteServerIP) == "0.0.0.0") ? "No IP" : String(currentConfig.remoteServerIP);
+      uint16_t status_color = ST77XX_WHITE; const char* status_str = "N/A";
+      switch(lastRemoteSendStatus) {
+          case RSS_OK: status_str = "OK"; status_color = ST77XX_GREEN; break;
+          case RSS_FAIL: status_str = "Fail"; status_color = ST77XX_RED; break;
+          case RSS_PENDING: status_str = "Sending"; status_color = ST77XX_YELLOW; break;
+          default: break;
+      }
+      String part1 = (countdown_s >= 0) ? Sprintf("%s|next:%lds", ip_display.c_str(), countdown_s) : Sprintf("%s|due", ip_display.c_str());
+      String part2 = Sprintf("|%s", status_str);
+      tft.fillRect(INFO_VALUE_X_OFFSET - 20, REMOTE_INFO_LINE_Y, TFT_WIDTH_ST7789 - (INFO_VALUE_X_OFFSET-20), INFO_LINE_HEIGHT - 1, ST77XX_BLACK);
+      tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK); tft.setTextSize(1);
+      tft.setCursor(INFO_VALUE_X_OFFSET - 20, REMOTE_INFO_LINE_Y); tft.print(part1);
+      tft.setTextColor(status_color, ST77XX_BLACK); tft.print(part2);
+  }
+  
+  bool graphDataChanged = false;
+  for (int i=0; i < min((int)GRAPH_SENSORS_TO_PLOT, totalDetectedSensors); i++) {
+    if (abs(currentTemperatures[i] - prevTemperaturesForGraph[i]) > 0.05 || (currentTemperatures[i] <= -127.0f) != (prevTemperaturesForGraph[i] <= -127.0f)) {
+        graphDataChanged = true; break;
+    }
+  }
+
+  float potentialGraphMin = 1000.0, potentialGraphMax = -1000.0; int validTempsForScale = 0;
+  for (int i = 0; i < min((int)GRAPH_SENSORS_TO_PLOT, totalDetectedSensors); i++) {
+    if (currentTemperatures[i] > -127.0 && currentTemperatures[i] != 85.0f) {
+      if (currentTemperatures[i] < potentialGraphMin) potentialGraphMin = currentTemperatures[i];
+      if (currentTemperatures[i] > potentialGraphMax) potentialGraphMax = currentTemperatures[i]; validTempsForScale++;
+    }
+  }
+  float newGraphDisplayMin, newGraphDisplayMax;
+  if(validTempsForScale > 0) {
+    newGraphDisplayMin = floor(potentialGraphMin / 5.0) * 5.0 - 5;
+    if (newGraphDisplayMin < 0 && potentialGraphMin >=0) newGraphDisplayMin = 0;
+    newGraphDisplayMin = max(newGraphDisplayMin, -50.0f);
+    newGraphDisplayMax = ceil(potentialGraphMax / 5.0) * 5.0 + 5;
+    newGraphDisplayMax = min(newGraphDisplayMax, 100.0f);
+    if (newGraphDisplayMax - newGraphDisplayMin < 10) newGraphDisplayMax = newGraphDisplayMin + 10;
+  } else { newGraphDisplayMin = 0.0; newGraphDisplayMax = 50.0; }
+
+  bool graphScaleValuesChanged = (abs(newGraphDisplayMin - actualGraphScaleMin) > 0.1 || abs(newGraphDisplayMax - actualGraphScaleMax) > 0.1);
+
+  if (graphDataChanged || forceFullRedraw || graphScaleValuesChanged) {
+    int graphContentY = GRAPH_AREA_Y_START + 1;
+    int graphBorderActualHeight = (TFT_HEIGHT_ST7789 - (INFO_LINE_HEIGHT + 2)) - GRAPH_AREA_Y_START;
+    drawTemperatureBarGraph(GRAPH_BORDER_X + 1, graphContentY, GRAPH_BORDER_W - 2, graphBorderActualHeight - 2, newGraphDisplayMin, newGraphDisplayMax);
+    actualGraphScaleMin = newGraphDisplayMin; actualGraphScaleMax = newGraphDisplayMax;
+    for (int i=0; i < GRAPH_SENSORS_TO_PLOT; i++) prevTemperaturesForGraph[i] = currentTemperatures[i];
+  }
+  
+  long currentHeap = ESP.getFreeHeap();
+  if (abs(currentHeap - prevHeap) > 100 || forceFullRedraw) {
+    char heapBuf[15];
+    sprintf(heapBuf, "%.1f KB", (float)currentHeap / 1024.0f);
+    tft.fillRect(INFO_VALUE_X_OFFSET - 30, TFT_HEIGHT_ST7789 - 8, TFT_WIDTH_ST7789 - (INFO_VALUE_X_OFFSET - 30), INFO_LINE_HEIGHT, ST77XX_BLACK);
+
+    tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
+    tft.setTextSize(1);
+    tft.setCursor(INFO_VALUE_X_OFFSET - 30, TFT_HEIGHT_ST7789 - 8);
+    tft.print(heapBuf);
+    prevHeap = currentHeap;
+  }
+}
+
+void drawTemperatureBarGraph(int x, int y, int w, int h, float displayMinTemp, float displayMaxTemp) {
+    tft.fillRect(x, y, w, h, ST77XX_BLACK);
+    int16_t x_bounds, y_bounds; uint16_t w_bounds, h_bounds;
+    int numSensorsToDisplay = min((int)GRAPH_SENSORS_TO_PLOT, totalDetectedSensors);
+    if (numSensorsToDisplay == 0) {
+        tft.setTextColor(ST77XX_WHITE); tft.setTextSize(1);
+        tft.getTextBounds("No data for graph.", 0, 0, &x_bounds, &y_bounds, &w_bounds, &h_bounds);
+        tft.setCursor(x + (w - w_bounds)/2, y + (h - h_bounds) / 2); tft.print(F("No data for graph."));
+        return;
+    }
+    float tempRange = (displayMaxTemp - displayMinTemp < 1.0f) ? 1.0f : (displayMaxTemp - displayMinTemp);
+    int barSpacing = 4;
+    int totalBarAndSpaceWidth = w / numSensorsToDisplay;
+    int barWidth = max(5, totalBarAndSpaceWidth - barSpacing);
+    if (barWidth < 5) barSpacing = (w - (barWidth * numSensorsToDisplay)) / (numSensorsToDisplay +1);
+    barSpacing = max(1, barSpacing);
+
+    int totalUsedWidth = (barWidth * numSensorsToDisplay) + (barSpacing * (numSensorsToDisplay -1));
+    int currentBarX_start = x + (w - totalUsedWidth) / 2;
+    tft.setTextSize(1);
+    tft.getTextBounds("S1", 0, 0, &x_bounds, &y_bounds, &w_bounds, &h_bounds);
+    uint16_t sensorLabelHeight = h_bounds + 2;
+    int graphEffectiveHeight = (h > sensorLabelHeight + 10) ? h - sensorLabelHeight : h;
+
+    if (alarmTemperatureThreshold_op >= displayMinTemp && alarmTemperatureThreshold_op <= displayMaxTemp) {
+        int alarmLineY = y + graphEffectiveHeight - (int)(((alarmTemperatureThreshold_op - displayMinTemp) / tempRange) * graphEffectiveHeight);
+        alarmLineY = constrain(alarmLineY, y, y + graphEffectiveHeight - 1);
+        for (int i_line = x; i_line < x + w; i_line += 4) tft.drawFastHLine(i_line, alarmLineY, 2, ST77XX_MAGENTA);
+    }
+
+    for (int i = 0; i < numSensorsToDisplay; i++) {
+        if (i >= MAX_SENSORS_TOTAL) break;
+        int currentBarX = currentBarX_start + i * (barWidth + barSpacing);
+        float temp = currentTemperatures[i];
+        
+        if (sensorLabelHeight > 0) {
+            char sensorLabel[4]; sprintf(sensorLabel, "S%d", i + 1);
+            tft.setTextSize(1); tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
+            tft.getTextBounds(sensorLabel, 0, 0, &x_bounds, &y_bounds, &w_bounds, &h_bounds);
+            tft.setCursor(currentBarX + (barWidth / 2) - (w_bounds / 2), y + graphEffectiveHeight + 1); tft.print(sensorLabel); 
+        }
+        if (temp <= -127.0f || temp == 85.0f) {
+            tft.setTextSize(1); tft.setTextColor(ST77XX_RED);
+            const char* val_str = (temp == 85.0f) ? "85?C" : "N/A";
+            tft.getTextBounds(val_str, 0, 0, &x_bounds, &y_bounds, &w_bounds, &h_bounds);
+            tft.setCursor(currentBarX + (barWidth / 2) - (w_bounds / 2), y + graphEffectiveHeight - h_bounds - 2); tft.print(val_str);
+            continue;
+        }
+        uint16_t barColor;
+        if (temp < currentConfig.graphTempThresholds[0]) barColor = currentConfig.graphTempColors[0];
+        else if (temp < currentConfig.graphTempThresholds[1]) barColor = currentConfig.graphTempColors[1];
+        else if (temp < currentConfig.graphTempThresholds[2]) barColor = currentConfig.graphTempColors[2];
+        else barColor = currentConfig.graphTempColors[3];
+        int barPixelHeight = constrain((int)(((temp - displayMinTemp) / tempRange) * graphEffectiveHeight), 0, graphEffectiveHeight);
+        int barRectY = y + graphEffectiveHeight - barPixelHeight;
+        tft.fillRect(currentBarX, barRectY, barWidth, barPixelHeight, barColor);
+
+        char tempStr[8]; dtostrf(temp, 3, 1, tempStr);
+        tft.setTextSize(1); tft.getTextBounds(tempStr, 0, 0, &x_bounds, &y_bounds, &w_bounds, &h_bounds);
+        int textX = currentBarX + (barWidth / 2) - (w_bounds / 2);
+        int textY = barRectY - h_bounds - 2;
+        uint16_t textColor = ST77XX_WHITE, textBgColor = ST77XX_BLACK;
+        if (barPixelHeight > h_bounds + 4 && (barRectY + 2 + h_bounds < y + graphEffectiveHeight)) {
+            textY = barRectY + 2; textBgColor = barColor;
+            int r = (barColor >> 11) & 0x1F, g = (barColor >> 5) & 0x3F, b = barColor & 0x1F;
+            if ((r * 299 + g * 587 + b * 114) / 1000 > 128) { textColor = ST77XX_BLACK; } else { textColor = ST77XX_WHITE; }
+        }
+        if (textY < y) textY = y + 2;
+        tft.setTextColor(textColor, textBgColor); tft.setCursor(textX, textY); tft.print(tempStr);
+    }
+
+    tft.setTextSize(1); tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
+    char scale_str[10];
+    if (graphEffectiveHeight > 20) {
+      dtostrf(displayMaxTemp,3,0,scale_str); strcat(scale_str, "C"); tft.setCursor(x + 2, y + 2); tft.print(scale_str);
+      dtostrf(displayMinTemp,3,0,scale_str); strcat(scale_str, "C"); tft.getTextBounds(scale_str, 0, 0, &x_bounds, &y_bounds, &w_bounds, &h_bounds); tft.setCursor(x + 2, y + graphEffectiveHeight - h_bounds - 1); tft.print(scale_str);
+    }
+}
+void updateHistoryData() {
+    unsigned long currentMillis_local = millis();
+    if (HISTORY_INTERVAL_MS == 0) return;
+    if (currentMillis_local - lastHistorySlotUpdateMillis >= HISTORY_INTERVAL_MS) {
+        int slots_to_advance = (currentMillis_local - lastHistorySlotUpdateMillis) / HISTORY_INTERVAL_MS;
+
+        slots_to_advance = min(slots_to_advance, HISTORY_SIZE); // Cap advancement
+
+        for (int p=0; p < slots_to_advance; p++) {
+            currentHistorySlot = (currentHistorySlot + 1) % HISTORY_SIZE;
+            for (int s = 0; s < MAX_SENSORS_TOTAL; s++) { historyMaxTemps[s][currentHistorySlot] = -200.0f; historyMinTemps[s][currentHistorySlot] = 200.0f; }
+        }
+        lastHistorySlotUpdateMillis += (unsigned long)slots_to_advance * HISTORY_INTERVAL_MS;
+    }
+    for (int i = 0; i < totalDetectedSensors; i++) {
+        float temp = currentTemperatures[i];
+        if (temp > -127.0f && temp != 85.0f) {
+            if (temp > historyMaxTemps[i][currentHistorySlot]) historyMaxTemps[i][currentHistorySlot] = temp;
+            if (temp < historyMinTemps[i][currentHistorySlot]) historyMinTemps[i][currentHistorySlot] = temp;
+        }
+    }
+}
+void calculateOverallMinMaxTemperatures() {
+    overallMax72h = -200.0f; overallMin72h = 200.0f;
+
+    if (HISTORY_INTERVAL_MS == 0) return;
+    int valid_intervals_since_boot = (int)(millis() / HISTORY_INTERVAL_MS);
+    int current_slots_filled = min(valid_intervals_since_boot + 1, HISTORY_SIZE);
+
+    for (int h_offset = 0; h_offset < current_slots_filled; h_offset++) {
+        int slotIndex = (currentHistorySlot - h_offset + HISTORY_SIZE) % HISTORY_SIZE;
+        for (int s = 0; s < totalDetectedSensors; s++) {
+            if (historyMaxTemps[s][slotIndex] > overallMax72h) overallMax72h = historyMaxTemps[s][slotIndex];
+            if (historyMinTemps[s][slotIndex] < overallMin72h) overallMin72h = historyMinTemps[s][slotIndex];
+        }
+    }
+}
+
+
+void setupWebServer() {
+    webServer.on("/", HTTP_GET, handleRoot);
+    webServer.on("/data.json", HTTP_GET, handleDataJson); 
+    webServer.on("/settings", HTTP_GET, handleSettingsGet);
+    webServer.on("/settings", HTTP_POST, handleSettingsPost);
+    webServer.on("/calibrate", HTTP_POST, handleCalibratePost);
+    webServer.on("/update", HTTP_POST, handleUpdate, handleUpdateUpload);
+    webServer.onNotFound(handleNotFound);
+    webServer.begin();
+    Serial.println("HTTP server started.");
+}
+
+void handleRoot() {
+    String page = serveHtmlHeader(currentConfig.deviceName);
+    page += Sprintf("<body><div class='container'><h1>%s</h1>", currentConfig.deviceName);
+    if (!webServerMessage.isEmpty()) { 
+        page += Sprintf("<div class='message %s'>%s</div>", (webServerMessage.indexOf("FAIL") != -1 || webServerMessage.indexOf("Error") != -1) ? "error" : "success", webServerMessage.c_str()); 
+        webServerMessage = ""; 
+    }
+    
+    if (apModeIsActive) {
+        page += serveApModeConfigPage();
+    } else {
+        page += F("<div style='text-align:center; margin-bottom: 20px;'><a href='/settings' class='submit-button' style='text-decoration:none; background-color:#007bff; display: inline-block; padding: 10px 20px;'>Go to Settings Page</a></div>");
+        page += serveCurrentTemperaturesSection();
+        page += serveDeviceInfoSection();
+    }
+
+    page += F("</div>");
+    page += serveJavascript();
+    page += F("</body></html>");
+    webServer.send(200, "text/html", page);
+}
+
+void handleDataJson() {
+    char json_buffer[1024]; // Use a buffer to build the JSON string
+    int offset = 0;
+    
+    offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset, "{\"temperatures\":[");
+    for(int i=0; i < totalDetectedSensors; i++) {
+        if (currentTemperatures[i] <= -127.0f) {
+            offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset, "\"N/A\"");
+        } else if (currentTemperatures[i] == 85.0f && abs(tempCalibration[i])<0.01f) {
+            offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset, "\"85.0?\"");
+        } else {
+            offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset, "\"%.1f\"", currentTemperatures[i]);
+        }
+        if (i < totalDetectedSensors - 1) offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset, ",");
+    }
+    offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset, "],");
+    
+    offset += snprintf(json_buffer + offset, sizeof(json_buffer) - offset, 
+        "\"uptime\":\"%s\",\"network_status\":\"%s\",\"ntp_time\":\"%s\","
+        "\"alarm_active\":%s,\"free_heap_kb\":\"%.1f\"}",
+        formatUptime(millis()).c_str(), networkStatusString.c_str(), currentTimeString.c_str(),
+        alarmActive ? "true" : "false", (float)ESP.getFreeHeap() / 1024.0f);
+
+    webServer.send(200, "application/json", json_buffer);
+}
+
+void handleSettingsGet() {
+    String page = serveHtmlHeader("TermoEth - Settings");
+    page += F("<body><div class='container'><h1>TermoEth - Settings</h1>");
+    if (!webServerMessage.isEmpty()) { 
+        page += Sprintf("<div class='message %s'>%s</div>", (webServerMessage.indexOf("FAIL") != -1 || webServerMessage.indexOf("Error") != -1) ? "error" : "success", webServerMessage.c_str()); 
+        webServerMessage = ""; 
+    }
+    page += F("<div style='text-align:center; margin-bottom: 20px;'><a href='/' class='submit-button' style='text-decoration:none; background-color:#6c757d; display: inline-block; padding: 10px 20px;'>Back to Main Page</a></div>");
+    page += serveSettingsSection();
+    page += serveCalibrationSection();
+    page += serveOtaSection();
+    page += F("</div>");
+    page += serveJavascript();
+    page += F("</body></html>");
+    webServer.send(200, "text/html", page);
+}
+
+// Хелперы для парсинга аргументов формы
+void getArg(const char* key, char* dest, size_t maxSize) {
+    if (webServer.hasArg(key)) {
+        strncpy(dest, webServer.arg(key).c_str(), maxSize - 1);
+        dest[maxSize - 1] = '\0';
+    }
+}
+void getArg(const char* key, IPAddress& dest) {
+    if (webServer.hasArg(key)) dest.fromString(webServer.arg(key));
+}
+template <typename T>
+void getArg(const char* key, T& dest) {
+    if (webServer.hasArg(key)) {
+        if (std::is_integral<T>::value) dest = webServer.arg(key).toInt();
+        else if (std::is_floating_point<T>::value) dest = webServer.arg(key).toFloat();
+    }
+}
+
+void handleSettingsPost() {
+    EepromConfig newConfig = currentConfig;
+    bool needsReboot = false;
+    
+    IPAddress oldStaticIP = currentConfig.staticIP;
+    String oldWifiSsid = String(currentConfig.wifiSsid);
+    String oldDeviceName = String(currentConfig.deviceName);
+
+    newConfig.remoteSendEnabled = webServer.hasArg("remote_send_enabled");
+    newConfig.useRemoteServerAsNtp = webServer.hasArg("use_remote_ntp");
+    newConfig.narodmonSendEnabled = webServer.hasArg("narodmon_send_enabled");
+    newConfig.wifiEnabled = webServer.hasArg("wifi_enabled");
+
+    getArg("static_ip", newConfig.staticIP); getArg("gateway_ip", newConfig.gateway);
+    getArg("subnet_mask", newConfig.subnet); getArg("dns_ip", newConfig.dnsServer);
+    getArg("wifi_mode", newConfig.wifiMode);
+    getArg("wifi_ssid", newConfig.wifiSsid, sizeof(newConfig.wifiSsid));
+    getArg("wifi_password", newConfig.wifiPassword, sizeof(newConfig.wifiPassword));
+    getArg("wifi_ap_ssid", newConfig.wifiApSsid, sizeof(newConfig.wifiApSsid));
+    getArg("wifi_ap_password", newConfig.wifiApPassword, sizeof(newConfig.wifiApPassword));
+    getArg("pdu_ip", newConfig.pduIPString, sizeof(newConfig.pduIPString));
+    getArg("pdu_cmd", newConfig.pduCommand, sizeof(newConfig.pduCommand));
+    getArg("alarm_temp", newConfig.alarmTemp);
+    getArg("gmt_offset", newConfig.gmtOffsetHours);
+    getArg("remote_server_ip", newConfig.remoteServerIP, sizeof(newConfig.remoteServerIP));
+    getArg("remote_send_interval", newConfig.remoteSendIntervalSec);
+    getArg("narodmon_mac", newConfig.narodmonMac, sizeof(newConfig.narodmonMac));
+    getArg("narodmon_send_interval", newConfig.narodmonSendIntervalSec);
+    getArg("graph_interval_seconds", newConfig.graphIntervalSeconds);
+    getArg("graph_thresh_0", newConfig.graphTempThresholds[0]);
+    getArg("graph_thresh_1", newConfig.graphTempThresholds[1]);
+    getArg("graph_thresh_2", newConfig.graphTempThresholds[2]);
+    getArg("graph_color_0", newConfig.graphTempColors[0]);
+    getArg("graph_color_1", newConfig.graphTempColors[1]);
+    getArg("graph_color_2", newConfig.graphTempColors[2]);
+    getArg("graph_color_3", newConfig.graphTempColors[3]);
+    getArg("geo_lat", newConfig.geoLat); getArg("geo_lon", newConfig.geoLon);
+    getArg("remote_server_port", newConfig.remoteServerPort);
+    getArg("device_name", newConfig.deviceName, sizeof(newConfig.deviceName));
+
+    for (int i=0; i<MAX_SENSORS_TOTAL; ++i) {
+        getArg(Sprintf("narodmon_id_%d", i).c_str(), newConfig.narodmonSensorIDs[i], sizeof(newConfig.narodmonSensorIDs[0]));
+        getArg(Sprintf("sensor_name_%d", i).c_str(), newConfig.sensorNames[i], sizeof(newConfig.sensorNames[0]));
+    }
+    
+    if (webServer.hasArg("moving_avg_window")) {
+        newConfig.movingAverageWindowSize = constrain(webServer.arg("moving_avg_window").toInt(), 1, MAX_MOVING_AVERAGE_WINDOW_SIZE);
+    }
+    
+    if (newConfig.staticIP != oldStaticIP || newConfig.wifiEnabled != currentConfig.wifiEnabled || 
+        newConfig.wifiMode != currentConfig.wifiMode || String(newConfig.wifiSsid) != oldWifiSsid || 
+        String(newConfig.deviceName) != oldDeviceName) { 
+        needsReboot = true; 
+    }
+
+    memcpy(&currentConfig, &newConfig, sizeof(EepromConfig));
+    saveConfig(needsReboot); 
+    if (!needsReboot) applyConfig();
+    
+    webServer.sendHeader("Location", "/settings", true);
+    webServer.send(302, "text/plain", "");
+}
+
+void handleCalibratePost() {
+    bool changesMade = false;
+    for (int i = 0; i < totalDetectedSensors; i++) {
+        String key = Sprintf("actual_temp%d", i);
+        if(webServer.hasArg(key)) {
+            // Recalculate raw temperature from the currently displayed value to avoid race conditions
+            float displayed_temp_when_submitted = currentTemperatures[i]; 
+            if(displayed_temp_when_submitted > -127.0f && displayed_temp_when_submitted != 85.0f) {
+                float raw_temp_measured = displayed_temp_when_submitted - currentConfig.calOffsets[i];
+                float desired_temp = webServer.arg(key).toFloat();
+                float new_offset = desired_temp - raw_temp_measured;
+                if (abs(new_offset) <= 20.0f && abs(currentConfig.calOffsets[i] - new_offset) > 0.001f) { 
+                    currentConfig.calOffsets[i] = new_offset;
+                    changesMade = true; 
+                }
+            }
+        }
+    }
+    if (changesMade) { 
+        saveConfig(false); 
+        applyConfig(); 
+        webServerMessage = "Calibration applied and saved."; 
+    } else { 
+        webServerMessage = "No new calibration changes detected."; 
+    }
+    webServer.sendHeader("Location", "/settings", true);
+    webServer.send(302, "text/plain", "");
+}
+
+void handleUpdate() {
+  webServer.sendHeader("Connection", "close");
+  webServer.send(200, "text/plain", (Update.hasError()) ? "UPDATE FAILED" : "OK");
+  delay(1000);
+  ESP.restart();
+}
+
+void handleUpdateUpload() {
+  HTTPUpload& upload = webServer.upload();
+  if (upload.status == UPLOAD_FILE_START) {
+    Serial.printf("Update Start: %s\n", upload.filename.c_str());
+    isOtaUpdating = true;
+    tft.fillScreen(ST77XX_BLACK);
+    tft.setTextColor(ST77XX_WHITE, ST77XX_BLACK);
+    tft.setTextSize(2); tft.setCursor(20, 120); tft.println("WEB OTA UPDATE");
+    tft.setTextSize(1); tft.setCursor(20, 150); tft.println("Receiving firmware...");
+    if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)) Update.printError(Serial);
+  } else if (upload.status == UPLOAD_FILE_WRITE) {
+    if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) Update.printError(Serial);
+    int percentage = (Update.progress() * 100) / (Update.size() > 0 ? Update.size() : 1);
+    tft.fillRect(20, 165, 200, 12, ST77XX_DARKGREY);
+    tft.fillRect(20, 165, constrain(percentage * 2, 0, 200), 12, ST77XX_GREEN);
+    tft.drawRect(20, 165, 200, 12, ST77XX_WHITE);
+  } else if (upload.status == UPLOAD_FILE_END) {
+    if (Update.end(true)) {
+      Serial.printf("Update Success: %u bytes\n", upload.totalSize);
+      tft.setCursor(20, 180); tft.println("Update Finished! Rebooting...");
+    } else {
+      Update.printError(Serial);
+      tft.fillScreen(ST77XX_RED);
+      tft.setTextColor(ST77XX_WHITE);
+      tft.setTextSize(2); tft.setCursor(20, 140); tft.println("Update FAILED!");
+    }
+    delay(2000);
+    isOtaUpdating = false;
+  }
+}
+
+void handleNotFound() {
+    if(apModeIsActive) {
+        webServer.sendHeader("Location", String("http://") + WiFi.softAPIP().toString(), true);
+        webServer.send(302, "text/plain", "");
+        return;
+    }
+    String message = "404 Not Found\nURI: " + webServer.uri();
+    webServer.send(404, "text/plain", message);
+}
+
+// CSS и JS вынесены в PROGMEM для экономии памяти и сокращения кода
+const char HTML_CSS[] PROGMEM = R"rawliteral(<style>
+body{font-family:Arial,sans-serif;margin:0;padding:0;background-color:#f4f4f4;color:#333;display:flex;justify-content:center}
+.container{width:95%;max-width:800px;margin:20px auto;padding:15px;background-color:#fff;box-shadow:0 0 10px rgba(0,0,0,0.1);border-radius:8px}
+h1,h2,h3{color:#0056b3;text-align:center}h1{font-size:2em;margin-bottom:25px}h2{font-size:1.5em;margin-top:25px;margin-bottom:15px}
+table{border-collapse:collapse;width:100%;margin-bottom:20px;box-shadow:0 2px 3px rgba(0,0,0,0.05)}th,td{border:1px solid #bbb;padding:10px;text-align:left;vertical-align:middle}
+th{background-color:#007bff;color:#fff}tr:nth-child(even){background-color:#f9f9f9}
+input[type=text],input[type=number],input[type=password],select{width:95%;padding:8px;margin:3px 0;border:1px solid #ccc;border-radius:4px;box-sizing:border-box}
+input[type=checkbox],input[type=radio]{width:auto;margin-right:5px;vertical-align:middle}input[type=text].cal{width:80px}
+.form-section{background-color:#fff;padding:20px;border-radius:5px;margin-bottom:25px;border:1px solid #ddd}
+.submit-button{margin-top:15px;padding:12px 25px;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:1em;background-color:#28a745}
+.message{padding:12px;margin-bottom:20px;border-radius:4px;text-align:center}.message.success{color:#155724;background-color:#d4edda;border:1px solid #c3e6cb}
+.message.error{color:#721c24;background-color:#f8d7da;border-color:#f5c6cb}.message.info{color:#0c5460;background-color:#d1ecf1;border-color:#bee5eb}
+.label{display:inline-block;min-width:160px;font-weight:700}.temp-overview{display:flex;flex-wrap:wrap;justify-content:center;gap:10px;margin-bottom:20px}
+.temp-card{background-color:#eef;border:1px solid #ccf;border-radius:5px;padding:10px;text-align:center;flex:1 1 130px;}
+.temp-card .sensor-id{font-size:.9em;color:#555}.temp-card .temp-value{font-size:1.5em;font-weight:700;margin:5px 0 2px}
+.timestamp{font-size:.8em;color:#666;margin-top:4px}
+.min-max-info{text-align:center;margin:5px 0 20px;font-size:1.1em;font-weight:700;color:#333}
+.info-text{font-size:.9em;color:#666;margin-top:-10px;margin-bottom:15px;text-align:center}
+#ota_progress_container{width:100%;background-color:#ddd;border-radius:4px;margin-top:15px;}
+#ota_progress_bar{width:0%;height:25px;background-color:#4caf50;text-align:center;line-height:25px;color:white;border-radius:4px;}
+#ota_status_message{margin-top:10px;font-weight:bold;}
+@media (max-width: 768px) {
+body { padding: 0; } .container { width: 100%; margin: 0; padding: 10px; border-radius: 0; box-shadow: none; }
+h1 { font-size: 1.6rem; } h2 { font-size: 1.2rem; } .form-section { padding: 10px; }
+table:not(.mobile-flex-table) thead { display: none; }
+table:not(.mobile-flex-table), table:not(.mobile-flex-table) tr, table:not(.mobile-flex-table) td { border: none; box-shadow: none; }
+table:not(.mobile-flex-table) tr { display: block; margin-bottom: 15px; padding: 10px; border: 1px solid #ddd; border-radius: 5px; background-color: #f9f9f9;}
+table:not(.mobile-flex-table) td:first-child { display: none; }
+table:not(.mobile-flex-table) td { display: block; text-align: left !important; padding: 0; }
+table:not(.mobile-flex-table) td[data-label]::before { content: attr(data-label); display: block; font-weight: bold; margin-bottom: 5px; color: #555; }
+input[type=text], input[type=number], input[type=password], select { width: 100%; box-sizing: border-box; }
+.mobile-flex-table thead { display: none; }
+.mobile-flex-table tr { display: flex; flex-wrap: nowrap; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #eee; background-color: transparent !important; border-radius: 0; }
+.mobile-flex-table tr:last-of-type { border-bottom: none; }
+.mobile-flex-table td { display: flex; align-items: center; border: none; padding: 0; }
+.mobile-flex-table td:first-child { flex: 0 0 auto; padding-right: 10px; font-weight: bold; color: #555; }
+.mobile-flex-table td:not(:first-child) { flex: 1 1 auto; justify-content: flex-end; text-align: right; }
+#calibration_table tr { display: block; }
+#calibration_table td { display: block; flex-basis: 100%; border-bottom: 1px solid #eee; padding: 8px; }
+#calibration_table td:last-child { border-bottom: 0; }
+#calibration_table td:first-child { display: block; }
+#calibration_table td[data-label]::before { content: attr(data-label); }
+}
+</style></head>
+)rawliteral";
+
+const char HTML_JS[] PROGMEM = R"rawliteral(<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const isMainPage = !!document.getElementById('uptime-val');
+    if (isMainPage) {
+        function updatePage() {
+            fetch('/data.json').then(r => r.json()).then(data => {
+                document.getElementById('uptime-val').textContent = data.uptime;
+                document.getElementById('net-status-val').textContent = data.network_status;
+                document.getElementById('ntp-time-val').textContent = data.ntp_time;
+                document.getElementById('heap-val').textContent = data.free_heap_kb + ' KB';
+                const alarmEl = document.getElementById('alarm-state-val');
+                alarmEl.innerHTML = data.alarm_active ? "<span style='color:red;font-weight:bold;'>ACTIVE</span>" : 'Normal';
+                data.temperatures.forEach((temp, i) => {
+                    const tempEl = document.getElementById('temp-val-' + i);
+                    if (tempEl) tempEl.innerHTML = (temp === 'N/A' || temp.includes('?')) ? temp : temp + '°C';
+                });
+            }).catch(e => console.error('Failed to fetch data:', e));
+        }
+        setInterval(updatePage, 3000);
+    }
+
+    const ota_form = document.getElementById('ota_form');
+    if (ota_form) {
+        ota_form.addEventListener('submit', function(e) {
+            e.preventDefault();
+            const file_input = ota_form.querySelector('input[type=file]');
+            if (!file_input.files.length) { alert('Please select a file!'); return; }
+            const ota_status = document.getElementById('ota_status_message');
+            ota_status.style.display='block';
+            ota_status.className='message info';
+            ota_status.innerHTML='Uploading...';
+            fetch('/update', { method: 'POST', body: new FormData(ota_form) })
+            .then(response => response.text())
+            .then(text => {
+                ota_status.className = text.includes('OK') ? 'message success' : 'message error';
+                ota_status.innerHTML = '<strong>' + (text.includes('OK') ? 'Success! Rebooting...' : 'Update Failed!') + '</strong>';
+            }).catch(error => {
+                ota_status.className='message error';
+                ota_status.innerHTML = '<strong>Network Error:</strong> ' + error;
+            });
+        });
+    }
+});
+</script>
+)rawliteral";
+
+String serveHtmlHeader(const char* pageTitle) {
+    String page = Sprintf("<!DOCTYPE HTML><html><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><title>%s</title>", pageTitle);
+    page += F("<link rel=\"icon\" href=\"data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3e%3crect x='1' y='1' width='30' height='30' rx='4' ry='4' fill='none' stroke='blue' stroke-width='2'/%3e%3ctext x='50%25' y='50%25' dominant-baseline='middle' text-anchor='middle' font-family='sans-serif' font-size='24' font-weight='bold' fill='red'%3eT%3c/text%3e%3c/svg%3e\">");
+    page += FPSTR(HTML_CSS);
+    return page;
+}
+
+String serveJavascript() {
+    return FPSTR(HTML_JS);
+}
+
+String serveApModeConfigPage() {
+    String page = F("<div class='form-section'><h2>WiFi Connection Setup</h2>");
+    page += F("<p class='info-text'>Device is in Access Point mode. Please configure WiFi to connect.</p>");
+    page += F("<form method='POST' action='/settings'><table>");
+    page += Sprintf("<tr><td>Network SSID</td><td><input type='text' name='wifi_ssid' value='%s' required></td></tr>", currentConfig.wifiSsid);
+    page += Sprintf("<tr><td>Network Password</td><td><input type='password' name='wifi_password' value='%s'></td></tr>", currentConfig.wifiPassword);
+    page += F("<input type='hidden' name='wifi_enabled' value='true'>");
+    page += Sprintf("<input type='hidden' name='wifi_mode' value='%d'>", CFG_WIFI_MODE_STA);
+    page += F("</table><p style='text-align:center;'><input type='submit' value='Save & Connect' class='submit-button'></p></form></div>");
+    return page;
+}
+
+String serveCurrentTemperaturesSection() {
+    String page = F("<div class='form-section'><h2>Current Temperatures</h2>");
+    if (totalDetectedSensors > 0) {
+        page += F("<div class='temp-overview'>");
+        for (int i = 0; i < totalDetectedSensors; i++) {
+            page += Sprintf("<div class='temp-card'><div class='sensor-id'><b>S%d</b>%s</div><div class='temp-value' id='temp-val-%d'>", 
+                i + 1, (strlen(currentConfig.sensorNames[i]) > 0 ? (": " + String(currentConfig.sensorNames[i])).c_str() : ""), i);
+            if(currentTemperatures[i] <= -127.0f) page += F("N/A"); 
+            else if(currentTemperatures[i] == 85.0f && abs(tempCalibration[i])<0.01f) page += F("85.0?°C"); 
+            else page += Sprintf("%.1f°C", currentTemperatures[i]);
+            page += F("</div></div>");
+        } 
+        page += F("</div>");
+    } else {
+        page += F("<p style='text-align:center;'>No DS18B20 sensors detected.</p>");
+    }
+    page += F("</div>");
+    return page;
+}
+
+// Хелперы для генерации однотипных строк в таблицах
+String generateInfoRow(const String& label, const String& value, const String& id = "") {
+    return Sprintf("<tr><td>%s</td><td%s>%s</td></tr>", label.c_str(), (id.length() > 0 ? (" id='" + id + "'").c_str() : ""), value.c_str());
+}
+String generateFormRow(const String& label, const String& control, const String& dataLabel = "") {
+    String finalDataLabel = dataLabel.isEmpty() ? label : dataLabel;
+    return Sprintf("<tr><td>%s</td><td data-label='%s'>%s</td></tr>", label.c_str(), finalDataLabel.c_str(), control.c_str());
+}
+
+String serveDeviceInfoSection() {
+    String page;
+    char macStr[18];
+    sprintf(macStr, "%02X:%02X:%02X:%02X:%02X:%02X", device_mac[0], device_mac[1], device_mac[2], device_mac[3], device_mac[4], device_mac[5]);
+
+    page += F("<div class='form-section'><h2>Device Information</h2><table class='mobile-flex-table'>");
+    page += generateInfoRow("Device Name", Sprintf("<b>%s</b>", currentConfig.deviceName));
+    page += generateInfoRow("Firmware Version", Sprintf("<b>%s</b>", FW_VERSION));
+    page += generateInfoRow("Device Uptime", formatUptime(millis()), "uptime-val");
+    page += generateInfoRow("Network Status", networkStatusString, "net-status-val");
+    page += generateInfoRow("Device MAC Address", Sprintf("<b>%s</b>", macStr));
+    page += generateInfoRow("Connected Sensors", String(totalDetectedSensors));
+    page += generateInfoRow("NTP Time", currentTimeString, "ntp-time-val");
+    page += generateInfoRow("Timezone", Sprintf("GMT%s%d", (currentConfig.gmtOffsetHours >= 0 ? "+" : ""), currentConfig.gmtOffsetHours));
+    page += generateInfoRow("Alarm State", alarmActive ? "<span style='color:red; font-weight:bold;'>ACTIVE</span>" : "Normal", "alarm-state-val");
+    page += generateInfoRow("Free Heap", Sprintf("%.1f KB", (float)ESP.getFreeHeap() / 1024.0f), "heap-val");
+    page += F("</table>");
+
+    page += F("<h3>Detected Sensor Details</h3><table><thead><tr><th>ID</th><th>Custom Name</th><th>ROM Address</th></tr></thead><tbody>");
+    if (totalDetectedSensors > 0) {
+        for (int i = 0; i < totalDetectedSensors; i++) {
+            page += Sprintf("<tr><td>S%d</td><td>%s</td><td>%s</td></tr>",
+                          i + 1, strlen(currentConfig.sensorNames[i]) > 0 ? currentConfig.sensorNames[i] : "-", deviceAddressToString(tempSensorAddresses[i]).c_str());
+        }
+    } else {
+        page += F("<tr><td colspan='3' style='text-align:center;'>No sensors detected</td></tr>");
+    }
+    page += F("</tbody></table></div>");
+    return page;
+}
+
+String serveColorSelect(const char* name, uint16_t selectedValue) {
+    String s = Sprintf("<select name='%s'>", name);
+    const struct { const char* name; uint16_t value; } colors[] = {
+        {"Blue", ST77XX_BLUE}, {"Green", ST77XX_GREEN}, {"Yellow", ST77XX_YELLOW},
+        {"Orange", ST77XX_ORANGE}, {"Red", ST77XX_RED}, {"White", ST77XX_WHITE},
+        {"Lime", ST77XX_LIME}, {"Purple", ST77XX_PURPLE}, {"Pink", ST77XX_PINK}, {"Gold", ST77XX_MYGOLD}
+    };
+    for (const auto& color : colors) {
+        s += Sprintf("<option value='%u'%s style='background-color:%s; color:%s;'>%s</option>", 
+                      color.value, (color.value == selectedValue) ? " selected" : "", rgb565ToHtmlColor(color.value).c_str(), 
+                      (color.value == ST77XX_BLUE || color.value == ST77XX_PURPLE) ? "white" : "black",
+                      color.name);
+    }
+    s += "</select>";
+    return s;
+}
+
+String serveSettingsSection() {
+    String page = F("<div class='form-section'><form method='POST' action='/settings'>");
+    
+    // --- General ---
+    page += F("<h3>General</h3><table>");
+    page += generateFormRow("Device Name", Sprintf("<input type='text' name='device_name' value='%s' maxlength='32'> <small>(Also for mDNS)</small>", currentConfig.deviceName));
+    page += F("</table>");
+    
+    // --- Network ---
+    page += F("<h3>Network (Eth & WiFi STA share IPs)</h3><p class='info-text'>Network settings require a reboot to apply.</p><table>");
+    page += generateFormRow("Static IP Address", Sprintf("<input type='text' name='static_ip' value='%s'> <small>(0.0.0.0 for DHCP)</small>", currentConfig.staticIP.toString().c_str()));
+    page += generateFormRow("Gateway", Sprintf("<input type='text' name='gateway_ip' value='%s'>", currentConfig.gateway.toString().c_str()));
+    page += generateFormRow("Subnet Mask", Sprintf("<input type='text' name='subnet_mask' value='%s'>", currentConfig.subnet.toString().c_str()));
+    page += generateFormRow("DNS Server", Sprintf("<input type='text' name='dns_ip' value='%s'>", currentConfig.dnsServer.toString().c_str()));
+    String tz_select; for (int i = -12; i <= 14; i++) tz_select += Sprintf("<option value='%d'%s>GMT%s%d</option>", i, (i == currentConfig.gmtOffsetHours ? " selected" : ""), (i >= 0 ? "+" : ""), i);
+    page += generateFormRow("Timezone", Sprintf("<select name='gmt_offset'>%s</select>", tz_select.c_str()));
+    page += F("</table>");
+    
+    // --- Geolocation ---
+    page += F("<h3>Geolocation</h3><p class='info-text'>Used for the universal JSON data packet.</p><table>");
+    page += generateFormRow("Latitude", Sprintf("<input type='number' step='any' name='geo_lat' value='%.4f'>", currentConfig.geoLat));
+    page += generateFormRow("Longitude", Sprintf("<input type='number' step='any' name='geo_lon' value='%.4f'>", currentConfig.geoLon));
+    page += F("</table>");
+
+    // --- WiFi ---
+    page += F("<h3>WiFi Specifics</h3><p class='info-text'>Changes here require a reboot to apply.</p><table>");
+    page += generateFormRow("Enable WiFi", Sprintf("<input type='checkbox' name='wifi_enabled' value='true'%s>", (currentConfig.wifiEnabled ? " checked" : "")));
+    page += generateFormRow("WiFi Mode", Sprintf("<input type='radio' name='wifi_mode' value='%d'%s> Client (STA) <input type='radio' name='wifi_mode' value='%d'%s> Access Point (AP)", CFG_WIFI_MODE_STA, (currentConfig.wifiMode == CFG_WIFI_MODE_STA ? " checked" : ""), CFG_WIFI_MODE_AP, (currentConfig.wifiMode == CFG_WIFI_MODE_AP ? " checked" : "")));
+    page += generateFormRow("Station SSID", Sprintf("<input type='text' name='wifi_ssid' value='%s' maxlength='32'>", currentConfig.wifiSsid));
+    page += generateFormRow("Station Password", Sprintf("<input type='password' name='wifi_password' value='%s' maxlength='64'>", currentConfig.wifiPassword));
+    page += generateFormRow("AP SSID", Sprintf("<input type='text' name='wifi_ap_ssid' value='%s' maxlength='32'>", currentConfig.wifiApSsid));
+    page += generateFormRow("AP Password", Sprintf("<input type='password' name='wifi_ap_password' value='%s' maxlength='64'> <small>(min 8 chars, empty for open)</small>", currentConfig.wifiApPassword));
+    page += F("</table>");
+
+    // --- Sensors ---
+    page += F("<h3>Sensors & Processing</h3><table>");
+    page += generateFormRow("Temp. Filter Window", Sprintf("<input type='number' name='moving_avg_window' value='%d' min='1' max='%d'> <small>(1-%d, higher=smoother)</small>", currentConfig.movingAverageWindowSize, MAX_MOVING_AVERAGE_WINDOW_SIZE, MAX_MOVING_AVERAGE_WINDOW_SIZE));
+    if (totalDetectedSensors > 0) {
+        page += F("<tr><td colspan='2'><b>Sensor Names</b></td></tr>");
+        for (int i = 0; i < totalDetectedSensors; i++) {
+            page += generateFormRow(Sprintf("Name for S%d", i + 1), Sprintf("<input type='text' name='sensor_name_%d' value='%s' maxlength='20'>", i, currentConfig.sensorNames[i]), Sprintf("Name for S%d (20 chars max)", i + 1));
+        }
+    }
+    page += F("</table>");
+
+    // --- Narodmon ---
+    page += F("<h3>Narodmon.ru Reporting</h3><table>");
+    page += generateFormRow("Enable Sending", Sprintf("<input type='checkbox' name='narodmon_send_enabled' value='true'%s>", (currentConfig.narodmonSendEnabled ? " checked" : "")));
+    char deviceMacStr[18]; sprintf(deviceMacStr, "%02X:%02X:%02X:%02X:%02X:%02X", device_mac[0], device_mac[1], device_mac[2], device_mac[3], device_mac[4], device_mac[5]);
+    page += generateFormRow("Device MAC", Sprintf("<input type='text' name='narodmon_mac' value='%s' maxlength='17'>", (strlen(currentConfig.narodmonMac)>0 ? currentConfig.narodmonMac : deviceMacStr)));
+    page += generateFormRow("Send Interval (s)", Sprintf("<input type='number' name='narodmon_send_interval' value='%d' min='240'> <small>(Min 240)</small>", currentConfig.narodmonSendIntervalSec));
+    if (totalDetectedSensors > 0) { 
+        for (int i = 0; i < totalDetectedSensors; i++) {
+            page += generateFormRow(Sprintf("Narodmon ID for S%d", i + 1), Sprintf("<input type='text' name='narodmon_id_%d' value='%s' maxlength='11'>", i, currentConfig.narodmonSensorIDs[i]));
+        }
+    }
+    page += F("</table>");
+
+    // --- Remote Data ---
+    page += F("<h3>Remote Data Reporting (JSON)</h3><table>");
+    page += generateFormRow("Enable Sending", Sprintf("<input type='checkbox' name='remote_send_enabled' value='true'%s>", (currentConfig.remoteSendEnabled ? " checked" : "")));
+    page += generateFormRow("Server IP", Sprintf("<input type='text' name='remote_server_ip' value='%s'>", currentConfig.remoteServerIP));
+    page += generateFormRow("Server Port", Sprintf("<input type='number' name='remote_server_port' value='%d' min='1' max='65535'>", currentConfig.remoteServerPort));
+    page += generateFormRow("Use as NTP Server", Sprintf("<input type='checkbox' name='use_remote_ntp' value='true'%s> <small>Use this server for time sync</small>", (currentConfig.useRemoteServerAsNtp ? " checked" : "")));
+    page += generateFormRow("Send Interval (s)", Sprintf("<input type='number' name='remote_send_interval' value='%d' min='10'>", currentConfig.remoteSendIntervalSec));
+    page += F("</table>");
+    
+    // --- PDU & Alarms ---
+    page += F("<h3>PDU & Alarms</h3><table>");
+    page += generateFormRow("PDU IP Address", Sprintf("<input type='text' name='pdu_ip' value='%s'>", currentConfig.pduIPString));
+    page += generateFormRow("PDU Command", Sprintf("<input type='text' name='pdu_cmd' value='%s' maxlength='64'>", currentConfig.pduCommand));
+    page += generateFormRow("Alarm Temp (°C)", Sprintf("<input type='number' step='0.1' name='alarm_temp' value='%.1f'>", currentConfig.alarmTemp));
+    page += F("</table>");
+
+    // --- Graph ---
+    page += F("<h3>Graph Settings</h3><table>");
+    String interval_select;
+    interval_select += Sprintf("<option value='60'%s>1 Minute</option>", currentConfig.graphIntervalSeconds == 60 ? " selected" : "");
+    interval_select += Sprintf("<option value='300'%s>5 Minutes</option>", currentConfig.graphIntervalSeconds == 300 ? " selected" : "");
+    interval_select += Sprintf("<option value='600'%s>10 Minutes</option>", currentConfig.graphIntervalSeconds == 600 ? " selected" : "");
+    page += generateFormRow("History Interval", Sprintf("<select name='graph_interval_seconds'>%s</select> <small>(Clears history)</small>", interval_select.c_str()));
+    page += F("</table><h4>Graph Color Scheme</h4><table><thead><tr><th>Condition</th><th>Threshold (°C)</th><th>Color</th></tr></thead><tbody>");
+    page += Sprintf("<tr><td>Temp < Thresh 1</td><td data-label='Threshold'><input type='number' step='0.1' name='graph_thresh_0' value='%.1f'></td><td>%s</td></tr>", currentConfig.graphTempThresholds[0], serveColorSelect("graph_color_0", currentConfig.graphTempColors[0]).c_str());
+    page += Sprintf("<tr><td>Thresh 1 ≤ Temp < Thresh 2</td><td data-label='Threshold'><input type='number' step='0.1' name='graph_thresh_1' value='%.1f'></td><td>%s</td></tr>", currentConfig.graphTempThresholds[1], serveColorSelect("graph_color_1", currentConfig.graphTempColors[1]).c_str());
+    page += Sprintf("<tr><td>Thresh 2 ≤ Temp < Alarm</td><td data-label='Threshold'><input type='number' step='0.1' name='graph_thresh_2' value='%.1f'></td><td>%s</td></tr>", currentConfig.graphTempThresholds[2], serveColorSelect("graph_color_2", currentConfig.graphTempColors[2]).c_str());
+    page += Sprintf("<tr><td>Temp ≥ Alarm</td><td>-</td><td>%s</td></tr>", serveColorSelect("graph_color_3", currentConfig.graphTempColors[3]).c_str());
+    page += F("</tbody></table>");
+    
+    page += F("<p style='text-align:center;'><input type='submit' value='Save All Settings' class='submit-button'></p><p class='info-text'>Device will reboot if Device Name or network configuration changes.</p></form></div>");
+    return page;
+}
+
+String serveCalibrationSection() {
+    String page;
+    page += F("<div class='form-section'><h2>Temperature Sensors & Calibration</h2>");
+    if (totalDetectedSensors > 0) {
+        page += F("<p class='info-text'>Allow sensor to stabilize, enter the real temperature, and submit.</p>");
+        page += F("<form method='POST' action='/calibrate'><table id='calibration_table'><thead><tr><th>Sensor</th><th>Raw</th><th>Offset</th><th>Displayed</th><th>Enter Actual</th></tr></thead><tbody>");
+        for (int i = 0; i < totalDetectedSensors; i++) {
+            float raw_reading = currentTemperatures[i] - currentConfig.calOffsets[i];
+            bool isErr_current = (raw_reading <= -127.0f || raw_reading == 85.0f);
+            
+            page += Sprintf("<tr><td data-label='Sensor'>S%d %s</td>", i+1, (strlen(currentConfig.sensorNames[i]) > 0 ? ("("+String(currentConfig.sensorNames[i])+")").c_str() : ""));
+            page += Sprintf("<td data-label='Raw'>%s</td>", isErr_current ? "Error" : String(raw_reading, 1).c_str());
+            page += Sprintf("<td data-label='Offset'>%.2f</td>", currentConfig.calOffsets[i]);
+            page += Sprintf("<td data-label='Displayed'>%s</td>", isErr_current ? "Error" : String(currentTemperatures[i], 1).c_str());
+            page += Sprintf("<td data-label='Enter Actual'><input type='text' class='cal' name='actual_temp%d' value='%s'></td></tr>", i, isErr_current ? "" : String(currentTemperatures[i],1).c_str());
+        }
+        page += F("</tbody></table><p style='text-align:center;'><input type='submit' value='Apply & Save Calibration' class='submit-button'></p></form>");
+    } else {
+        page += F("<p style='text-align:center;'>No sensors detected.</p>");
+    }
+    page += F("</div>");
+    return page;
+}
+
+String serveOtaSection() {
+    String page = F("<div class='form-section'><h2>Firmware Update (Web OTA)</h2>");
+    page += Sprintf("<p class='info-text'>Current Version: <b>%s</b></p>", FW_VERSION);
+    page += F("<form method='POST' action='/update' enctype='multipart/form-data' id='ota_form'>");
+    page += F("<input type='file' name='update' accept='.bin' required>");
+    page += F("<input type='submit' value='Upload & Update' class='submit-button' style='background-color:#007bff;'>");
+    page += F("</form><div id='ota_status_message' style='display:none;'></div></div>");
+    return page;
+}

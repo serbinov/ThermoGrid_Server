@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>ThermoGrid Server</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
+</head>
+<body>
+    <div class="app-container">
+        <!-- Боковая панель устройств -->
+        <aside id="devices-list" class="sidebar">
+            <div class="sidebar-header">Devices (total xx) _filter_</div>
+            <!-- Устройства будут добавлены JS -->
+        </aside>
+
+        <!-- Основной контент -->
+        <div class="content-wrapper">
+            <!-- Навигация -->
+            <nav class="app-nav">
+                <div class="app-title">
+                    <h1>ThermoGrid Server</h1>
+                    <div id="nav-buttons">
+                        <button data-view="dashboard" class="nav-button active">Dashboard</button>
+                        <button data-view="json" class="nav-button">JSON Data</button>
+                        <button data-view="settings" class="nav-button">Settings</button>
+                        <button id="about-btn" class="nav-button" title="О программе">О программе</button>
+                    </div>
+                </div>
+            </nav>
+
+            <!-- Основное содержимое -->
+            <main id="main-content" class="main-content">
+                <!-- Dashboard View -->
+                <div id="dashboard-view" class="view active">
+                    <!-- Горизонтальная секция: Информация об устройстве + Датчики -->
+                    <div class="main-dashboard-row">
+                        <!-- Информация об устройстве -->
+                        <div class="device-info-section">
+                            <div class="device-info-header">
+                                <div class="device-status normal" id="device-status">Normal</div>
+                            </div>
+                            <div class="device-info-grid" id="device-info-panel">
+                                <!-- Информация будет добавлена JS -->
+                            </div>
+                        </div>
+
+                        <!-- Датчики -->
+                        <div class="sensors-section">
+                            <div class="sensors-grid" id="sensors-cards">
+                                <!-- Карточки датчиков будут добавлены JS -->
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- График -->
+                    <div class="chart-section">
+                        <h3 class="chart-title">График температур</h3>
+                        <div id="chart-loading" class="chart-loading" style="display: none;">Загрузка из базы</div>
+                        <div class="chart-container">
+                            <canvas id="temperatureChart"></canvas>
+                        </div>
+                        <div class="chart-controls">
+                            <div class="time-slider-container">
+                                <div class="time-slider-wrapper">
+                                    <input type="range" id="timeSlider" min="0" max="100" value="100" class="time-slider" disabled>
+                                </div>
+                                <!-- Скрытые элементы для хранения данных ползунка -->
+                                <div style="display: none;">
+                                    <span id="sliderTime">--</span>
+                                    <span id="sliderTemperature">--°C</span>
+                                </div>
+                            </div>
+                            <!-- Компактная строка времени и мини-шкала -->
+                            <div class="chart-time-info">
+                                <div class="time-info-text">
+                                    <span>Точка:</span>
+                                    <strong id="infoCurrentTime">--</strong>
+                                    <span class="sep">|</span>
+                                    <span>Диапазон:</span>
+                                    <strong id="infoRange">--</strong>
+                                    <span class="sep">|</span>
+                                    <span>Период:</span>
+                                    <strong id="infoPeriod">1 час</strong>
+                                </div>
+                                <div class="timeline-container">
+                                    <div class="timeline-bar">
+                                        <div id="timelineWindow" class="timeline-window"></div>
+                                        <div id="timelineCursor" class="timeline-cursor"></div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="chart-period-buttons">
+                                <button class="chart-button active" data-period="1">1 ЧАС</button>
+                                <button class="chart-button" data-period="3">3 ЧАСА</button>
+                                <button class="chart-button" data-period="6">6 ЧАСОВ</button>
+                                <button class="chart-button" data-period="12">12 ЧАСОВ</button>
+                                <button class="chart-button" data-period="24">24 ЧАСА</button>
+                                <button class="chart-button" data-period="168">7 СУТОК</button>
+                                <button class="chart-button" data-period="all">ВСЁ ВРЕМЯ</button>
+                                <button id="approx-toggle" class="chart-button" title="Сглаживание/аппроксимация графика">АПРОКСИМАЦИЯ</button>
+                                <div class="chart-navigation-buttons">
+                                    <button id="chart-prev" class="chart-nav-button" title="Назад">◀</button>
+                                    <button id="chart-now" class="chart-nav-button" title="Текущее время">⟳</button>
+                                    <button id="chart-next" class="chart-nav-button" title="Вперед">▶</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- JSON View -->
+                <div id="json-view" class="view">
+                    <pre id="json-pre">Выберите устройство для просмотра JSON данных</pre>
+                </div>
+
+                <!-- Settings View -->
+                <div id="settings-view" class="view">
+                    <div class="settings-form-container">
+                        <h2>Настройки сервера</h2>
+                        <form id="settings-form">
+                            <div class="form-group">
+                                <label for="server-ip">IP адрес сервера</label>
+                                <input type="text" id="server-ip" name="server_ip" readonly>
+                                <small>Адрес, на который устройства отправляют данные</small>
+                            </div>
+                            <div class="form-group">
+                                <label for="server-port">Сетевой порт</label>
+                                <input type="number" id="server-port" name="server_port" min="1024" max="65535" placeholder="9090">
+                                <small>Требует перезапуск для применения</small>
+                            </div>
+                            <div class="form-group">
+                                <label for="max-points">Максимум точек на графике</label>
+                                <input type="number" id="max-points" name="max_points" min="100" step="100" placeholder="1000">
+                                <small>Ограничение числа точек ускоряет загрузку и отображение (по умолчанию 1000)</small>
+                            </div>
+                            <div class="form-group">
+                                <label for="repo-url">Ссылка на репозиторий</label>
+                                <input type="url" id="repo-url" name="repo_url" placeholder="https://github.com/user/repo">
+                            </div>
+                            <div class="form-group">
+                                <label for="json-proto-url">Ссылка на JSON протокол</label>
+                                <input type="url" id="json-proto-url" name="json_protocol_url" placeholder="/static/json_protocol.html">
+                            </div>
+                            <div class="form-group checkbox-group">
+                                <input type="checkbox" id="ntp-enabled" name="ntp_enabled">
+                                <label for="ntp-enabled">Включить NTP сервер (UDP порт 123)</label>
+                            </div>
+                            <button type="submit">Сохранить настройки</button>
+                        </form>
+                    </div>
+                </div>
+            </main>
+        </div>
+    </div>
+    <script src="/static/app.js"></script>
+    <!-- Окно О программе -->
+    <div id="about-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.35); z-index:1000; align-items:center; justify-content:center;">
+        <div style="background:#fff; border-radius:8px; padding:20px; width:min(520px, 90vw); box-shadow:0 10px 30px rgba(0,0,0,0.2);">
+            <h2 style="margin-top:0;">О программе</h2>
+            <div id="about-content" style="font-size:14px; color:#333; line-height:1.5;">
+                <!-- Наполняется JS -->
+            </div>
+            <div style="margin-top:16px; text-align:right;">
+                <button id="about-close" class="nav-button">Закрыть</button>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

@@ -1,0 +1,711 @@
+body { 
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; 
+    margin: 0; 
+    background-color: #f5f5f5; 
+}
+
+.app-container { 
+    display: flex; 
+    height: 100vh; 
+}
+
+/* Боковая панель устройств */
+.sidebar { 
+    width: 250px; 
+    background-color: #fff; 
+    border-right: 1px solid #e0e0e0; 
+    overflow-y: auto; 
+    flex-shrink: 0; 
+}
+
+.sidebar-header {
+    padding: 12px 12px;
+    border-bottom: 1px solid #e0e0e0;
+    background-color: #f8f9fa;
+    font-weight: 600;
+    font-size: 14px;
+    color: #333;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+.sidebar-header-label { font-weight: 600; }
+
+.sidebar-filter-btn {
+    border: 1px solid #dcdfe6;
+    background: #fff;
+    color: #333;
+    border-radius: 6px;
+    cursor: pointer;
+    padding: 4px 8px;
+    font-size: 14px;
+    line-height: 1;
+}
+
+.sidebar-filter-btn:hover { background: #f5f5f5; }
+
+.filter-chip {
+    background: #e6f1ff;
+    color: #1a73e8;
+    border: 1px solid #cfe3ff;
+    padding: 2px 6px;
+    border-radius: 12px;
+    font-size: 12px;
+}
+
+.sidebar-filter-btn.active { background: #e6f1ff; border-color: #cfe3ff; }
+.sidebar-filter-clear { color: #f44336; }
+
+.content-wrapper { 
+    display: flex; 
+    flex-direction: column; 
+    flex-grow: 1; 
+    overflow: hidden; 
+}
+
+/* Устройства в боковой панели */
+.device-card {
+    margin: 8px;
+    padding: 15px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.2s;
+    color: white;
+    font-weight: 500;
+    border: 2px solid transparent;
+}
+
+.device-card.selected {
+    border-color: #333;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+.device-card:hover {
+    transform: translateY(-1px);
+}
+
+.device-card.status-green { 
+    background: #4CAF50; 
+}
+
+.device-card.status-orange { 
+    background: #FF9800; 
+}
+
+.device-card.status-red { 
+    background: #f44336; 
+}
+
+.device-card .device-name {
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 4px;
+}
+
+.device-card .device-ip {
+    font-size: 12px;
+    opacity: 0.9;
+}
+/* Навигация */
+.app-nav {
+    padding: 0 20px;
+    background-color: #fff;
+    border-bottom: 1px solid #e0e0e0;
+    flex-shrink: 0;
+}
+
+.app-title {
+    height: 48px;
+    padding: 0 12px;
+    background: #fff;
+    border-bottom: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+}
+
+.app-title h1 {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 700;
+    color: #333;
+    letter-spacing: 0.5px;
+    line-height: 48px;
+    text-align: center;
+    flex: 1;
+}
+
+#nav-buttons {
+    position: absolute;
+    right: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    display: flex;
+    gap: 6px;
+}
+
+.nav-button {
+    padding: 8px 16px;
+    border: 1px solid #e0e0e0;
+    background: #fff;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.2s;
+    font-size: 14px;
+}
+
+.nav-button:hover {
+    background: #f5f5f5;
+}
+
+.nav-button.active {
+    background: #409eff;
+    color: white;
+    border-color: #409eff;
+}
+
+/* Основной контент */
+.main-content {
+    flex: 1;
+    overflow-y: hidden;
+    padding: 8px;
+    background-color: #f5f5f5;
+}
+
+.view {
+    display: none;
+    height: 100%;
+}
+
+.view.active {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+/* Название устройства по центру вверху */
+.device-title-section {
+    text-align: center;
+    background: white;
+    padding: 8px;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.device-title-section h2 {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 600;
+    color: #333;
+}
+
+/* Горизонтальная строка с информацией и датчиками */
+.main-dashboard-row {
+    display: flex;
+    gap: 8px;
+    align-items: stretch;
+}
+
+/* Информационная панель устройства */
+.device-info-section {
+    background: white;
+    padding: 8px 12px 4px;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    flex-shrink: 0;
+    width: 420px;
+    min-width: 420px;
+    max-width: 420px;
+    box-sizing: border-box;
+}
+
+.device-info-header {
+    margin-bottom: 15px;
+    display: none;
+}
+
+.device-status {
+    padding: 8px 16px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    display: inline-block;
+}
+
+.device-status.normal {
+    background: #e8f5e8;
+    color: #4CAF50;
+}
+
+.device-status.alarm {
+    background: #ffebee;
+    color: #f44336;
+}
+
+.device-info-columns {
+    display: flex;
+    justify-content: space-between;
+    gap: 15px;
+}
+
+.device-info-column {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+}
+
+.device-info-grid {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 5px;
+    width: 100%;
+}
+
+.device-info-item {
+    display: flex;
+    align-items: baseline;
+    padding: 1px 0;
+}
+
+.device-info-label {
+    color: #333;
+    font-size: 13px;
+    font-weight: 700;
+    white-space: nowrap;
+    margin-right: 8px;
+    text-align: left;
+    flex-shrink: 0;
+}
+
+.device-info-value {
+    font-weight: normal;
+    color: #333;
+    font-size: 13px;
+    overflow-wrap: break-word;
+    word-break: break-all;
+}
+
+/* Сетка датчиков - справа от информации об устройстве */
+.sensors-section {
+    background: white;
+    padding: 8px 12px;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+}
+
+.sensors-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(80px, 150px));
+    gap: 35px;
+    /* Prevent the grid itself from stretching if the container is too wide */
+    justify-content: center; 
+}
+
+.sensor-card {
+    background: #ffffff;
+    border: 1px solid #e3e7ed;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.03), 0 0 0 2px #f0f2f7 inset;
+    border-radius: 8px;
+    padding: 8px;
+    text-align: center;
+    transition: all 0.2s;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    width: 100%;
+    min-width: 0;
+}
+
+.sensor-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+.sensor-card.has-data {
+    background: white;
+    border-color: #409eff;
+}
+
+.sensor-card.alarm {
+    border-color: #f44336;
+    background: #ffebee;
+}
+
+.sensor-card.inactive {
+    background: #f8f9fa;
+    border-color: #e9ecef;
+    box-shadow: none;
+}
+
+.sensor-card.inactive .sensor-header,
+.sensor-card.inactive .sensor-no-data {
+    color: #adb5bd;
+}
+
+.sensor-header {
+    font-size: 10px;
+    font-weight: 600;
+    color: #666;
+    margin-bottom: 6px;
+}
+
+.sensor-temperature {
+    font-size: 16px;
+    font-weight: bold;
+    color: #333;
+    margin-bottom: 2px;
+}
+
+.sensor-humidity {
+    font-size: 9px;
+    color: #666;
+}
+
+/* Подсветка карточек при перетаскивании курсора */
+.sensor-card.highlight .sensor-temperature {
+    font-size: 20px;
+}
+
+.sensor-card.highlight .sensor-humidity {
+    font-weight: 700;
+}
+
+.sensor-no-data {
+    color: #999;
+    font-size: 12px;
+    font-weight: 500;
+}
+
+/* График */
+.chart-section {
+    background: white;
+    border-radius: 8px;
+    padding: 12px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+}
+
+.chart-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: #333;
+    margin: 0 0 10px 0;
+}
+
+.chart-loading {
+    display: inline-block;
+    background: #fff3cd;
+    color: #8a6d3b;
+    border: 1px solid #ffeeba;
+    border-radius: 6px;
+    padding: 4px 8px;
+    font-size: 12px;
+    font-weight: 600;
+    margin: 4px 0 8px;
+}
+
+.chart-container {
+    flex: 1;
+    position: relative;
+    margin-bottom: 10px;
+    min-height: 150px; /* Минимальная высота для графика */
+}
+
+.chart-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+    padding-top: 8px;
+    border-top: 1px solid #e0e0e0;
+}
+
+/* Компактная строка времени + мини-шкала */
+.chart-time-info {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 4px 0 0;
+}
+.time-info-text { font-size: 12px; color: #444; }
+.time-info-text strong { font-weight: 700; }
+.time-info-text .sep { opacity: 0.6; margin: 0 6px; }
+.timeline-container { flex: 1; display: flex; align-items: center; }
+.timeline-bar {
+    position: relative; height: 6px; width: 100%; background: #eef2f7; border-radius: 4px; overflow: hidden;
+}
+.timeline-window { position: absolute; top: 0; height: 100%; background: rgba(64,158,255,0.35); border-left: 1px solid #409eff; border-right: 1px solid #409eff; }
+.timeline-cursor { position: absolute; top: -4px; width: 0; height: 14px; border-left: 2px dashed #f00; }
+
+/* Ползунок времени */
+.time-slider-container {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    position: relative;
+}
+
+.time-slider-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 15px;
+    position: absolute;
+    top: -25px;
+    left: 50px;
+    right: 50px;
+    z-index: 10;
+    pointer-events: none;
+}
+
+.time-slider {
+    flex: 1;
+    display: none; /* скрываем визуальный ползунок, рисуем на канвасе */
+}
+
+/* thumb не нужен, все рисуем на канвасе */
+.time-slider::-webkit-slider-thumb { -webkit-appearance: none; appearance: none; width: 0; height: 0; border: none; }
+.time-slider::-moz-range-thumb { width: 0; height: 0; border: none; background: transparent; }
+
+.time-slider:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.time-slider:disabled::-webkit-slider-thumb {
+    border-bottom-color: #ccc;
+}
+
+.time-slider:disabled::-moz-range-thumb {
+    border-bottom-color: #ccc;
+}
+
+/* Кнопки управления графиком */
+.chart-period-buttons {
+    display: flex;
+    gap: 4px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.chart-navigation-buttons {
+    display: flex;
+    gap: 6px;
+    margin-left: 10px;
+    pointer-events: auto;
+}
+
+.chart-nav-button {
+    background: var(--primary-color);
+    color: white;
+    border: none;
+    border-radius: 4px;
+    padding: 6px 10px;
+    cursor: pointer;
+    font-size: 14px;
+    transition: background-color 0.2s;
+}
+
+.chart-nav-button:hover {
+    background: var(--primary-hover);
+}
+
+.chart-nav-button:disabled {
+    background: #ccc;
+    cursor: not-allowed;
+}
+
+.chart-button {
+    padding: 8px 16px;
+    border: 1px solid #dcdfe6;
+    background: white;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 500;
+    transition: all 0.2s;
+}
+
+.chart-button:hover {
+    background: #f5f5f5;
+}
+
+.chart-button.active {
+    background: #409eff;
+    color: white;
+    border-color: #409eff;
+}
+
+.chart-nav-button {
+    width: 36px;
+    height: 36px;
+    border: 1px solid #409eff;
+    background: #409eff;
+    color: #fff;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s;
+}
+
+.chart-nav-button:hover {
+    background: #3a8ee6;
+    border-color: #3a8ee6;
+}
+
+#chart-now { color: #fff; }
+
+.chart-nav-button:disabled {
+    background: #a0caff;
+    border-color: #a0caff;
+    color: #fff;
+    cursor: not-allowed;
+}
+
+/* JSON View */
+#json-pre {
+    background: #f8f9fa;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    padding: 20px;
+    font-family: 'Courier New', monospace;
+    font-size: 12px;
+    white-space: pre-wrap;
+    overflow-x: auto;
+}
+
+/* Settings */
+.settings-form-container {
+    background: white;
+    border-radius: 8px;
+    padding: 30px;
+    max-width: 600px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.form-group {
+    margin-bottom: 20px;
+}
+
+.form-group label {
+    display: block;
+    margin-bottom: 5px;
+    font-weight: 500;
+    color: #333;
+}
+
+.form-group input {
+    width: 100%;
+    padding: 10px;
+    border: 1px solid #dcdfe6;
+    border-radius: 6px;
+    font-size: 14px;
+    box-sizing: border-box;
+}
+
+.form-group input:focus {
+    outline: none;
+    border-color: #409eff;
+    box-shadow: 0 0 0 2px rgba(64, 158, 255, 0.2);
+}
+
+.form-group small {
+    display: block;
+    margin-top: 5px;
+    color: #666;
+    font-size: 12px;
+}
+
+.checkbox-group {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.checkbox-group input {
+    width: auto;
+}
+
+button[type="submit"] {
+    background: #409eff;
+    color: white;
+    border: none;
+    padding: 12px 24px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+    transition: background 0.2s;
+}
+
+button[type="submit"]:hover {
+    background: #3a8ee6;
+}
+
+/* Заголовок приложения */
+.app-title {
+    height: 48px;
+    padding: 0 12px;
+    background: #fff;
+    border-bottom: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+}
+
+.app-title h1 {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 700;
+    color: #333;
+    letter-spacing: 0.5px;
+    line-height: 48px;
+    text-align: center;
+    flex: 1;
+}
+
+/* Адаптивность */
+@media (max-width: 1200px) {
+    .sensors-grid {
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    }
+}
+
+@media (max-width: 992px) {
+    .main-dashboard-row {
+        flex-direction: column;
+    }
+    .device-info-section {
+        width: 100%;
+        max-width: 100%;
+    }
+    .sensors-grid {
+        /* Allow cards to wrap on smaller screens */
+        grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    }
+}
+
+@media (max-width: 600px) {
+    .app-container {
+        flex-direction: column;
+    }
+    
+    .sidebar {
+        width: 100%;
+        height: auto;
+    }
+}

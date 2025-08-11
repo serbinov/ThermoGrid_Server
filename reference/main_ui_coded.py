@@ -1,0 +1,77 @@
+# file: main_ui_coded.py
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QSplitter, QTreeWidget, QTabWidget, QTableWidget,
+    QPushButton, QHBoxLayout, QHeaderView, QAbstractItemView, QCheckBox,
+    QGroupBox, QFormLayout, QLabel, QSpinBox, QFrame, QScrollBar
+)
+from PySide6.QtCore import Qt
+from matplotlib_widget import MatplotlibWidget
+from flow_layout import FlowLayout 
+
+class Ui_MainWindow(object):
+    def setupUi(self, MainWindow):
+        MainWindow.setObjectName("MainWindow")
+        MainWindow.setWindowTitle("ThermoGrid Server")
+        MainWindow.resize(1200, 800)
+        self.centralwidget = QWidget(MainWindow)
+        MainWindow.setCentralWidget(self.centralwidget)
+        self.main_layout = QVBoxLayout(self.centralwidget)
+        self.main_layout.setContentsMargins(5, 5, 5, 5)
+        self.splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.deviceTreeWidget = QTreeWidget()
+        
+        # ИЗМЕНЕНИЕ: Скрываем стандартный заголовок
+        self.deviceTreeWidget.setHeaderHidden(True)
+        
+        self.mainTabWidget = QTabWidget()
+        self.graphs_tab = QWidget()
+        self.alarms_tab = QWidget()
+        self.settings_tab = QWidget()
+        self.mainTabWidget.addTab(self.graphs_tab, "Графики")
+        self.mainTabWidget.addTab(self.alarms_tab, "Оповещения")
+        self.mainTabWidget.addTab(self.settings_tab, "Настройки")
+        self.graphs_layout = QVBoxLayout(self.graphs_tab)
+        self.graphs_layout.setContentsMargins(5, 5, 5, 5)
+        self.graphs_layout.setSpacing(10)
+        self.cardsPanel = QWidget()
+        self.cardsPanel.setFixedHeight(120) 
+        self.cardsLayout = FlowLayout(self.cardsPanel, margin=5, h_spacing=10, v_spacing=5)
+        self.graphs_layout.addWidget(self.cardsPanel)
+        self.plotWidget = MatplotlibWidget()
+        self.graphs_layout.addWidget(self.plotWidget)
+        self.timeScrollBar = QScrollBar(Qt.Orientation.Horizontal)
+        self.graphs_layout.addWidget(self.timeScrollBar)
+        self.alarms_layout = QVBoxLayout(self.alarms_tab)
+        self.alarmsTableWidget = QTableWidget()
+        self.alarmsTableWidget.setColumnCount(5)
+        self.alarmsTableWidget.setHorizontalHeaderLabels(["Устройство/Сенсор", "Тип данных", "Условие", "Значение", "Действие"])
+        self.alarmsTableWidget.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.alarmsTableWidget.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.alarmsTableWidget.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.alarm_buttons_layout = QHBoxLayout()
+        self.addAlarmButton = QPushButton("Добавить правило")
+        self.removeAlarmButton = QPushButton("Удалить правило")
+        self.alarm_buttons_layout.addStretch()
+        self.alarm_buttons_layout.addWidget(self.addAlarmButton); self.alarm_buttons_layout.addWidget(self.removeAlarmButton)
+        self.alarms_layout.addWidget(self.alarmsTableWidget); self.alarms_layout.addLayout(self.alarm_buttons_layout)
+        self.settings_layout = QVBoxLayout(self.settings_tab)
+        integration_groupbox = QGroupBox("Системная интеграция")
+        integration_layout = QFormLayout(integration_groupbox)
+        self.autostartCheckBox = QCheckBox("Запускать вместе с системой")
+        self.startInTrayCheckBox = QCheckBox("Запускать свернутым в трей")
+        integration_layout.addRow(self.autostartCheckBox)
+        integration_layout.addRow(self.startInTrayCheckBox)
+        network_groupbox = QGroupBox("Сетевые настройки")
+        network_layout = QFormLayout(network_groupbox)
+        self.portSpinBox = QSpinBox()
+        self.portSpinBox.setRange(1, 65535)
+        self.applyNetworkSettingsButton = QPushButton("Применить и перезапустить сервер")
+        network_layout.addRow(QLabel("Сетевой порт для приема данных:"), self.portSpinBox)
+        network_layout.addRow(self.applyNetworkSettingsButton)
+        self.settings_layout.addWidget(integration_groupbox)
+        self.settings_layout.addWidget(network_groupbox)
+        self.settings_layout.addStretch()
+        self.splitter.addWidget(self.deviceTreeWidget)
+        self.splitter.addWidget(self.mainTabWidget)
+        self.splitter.setSizes([250, 950]) 
+        self.main_layout.addWidget(self.splitter)

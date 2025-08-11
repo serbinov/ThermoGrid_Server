@@ -1,0 +1,38 @@
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+.env/
+.venv/
+venv/
+env/
+
+# Build / dist
+/dist/
+/build/
+
+# Logs
+*.log
+
+# Project-specific
+thermogrid.db
+backups/
+*.zip
+
+# Misc
+*.swp
+*.swo
