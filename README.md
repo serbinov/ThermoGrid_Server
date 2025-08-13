@@ -198,3 +198,14 @@ py main.py
 ---
 
 If you need more details, open an issue or extend this document.
+
+### Build a small one-file EXE (Windows)
+- Use the headless entrypoint to avoid bundling PySide6:
+  - server_headless.py exposes the same API and UI in the browser, without tray.
+- From an activated venv run one of:
+  - PowerShell: `./build_exe.ps1` (optionally add `-UseUPX` if UPX is installed)
+  - CMD: `build_exe.bat`
+- Output will be placed in `WIN_64/ThermoGridServer.exe`.
+- Notes for minimal size:
+  - Excludes: PySide6, GUI libs, scientific libs; only FastAPI/Uvicorn/SQLite are bundled.
+  - With UPX you can reduce a few more MB.
