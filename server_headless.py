@@ -4,10 +4,12 @@ Headless entrypoint for ThermoGrid Server (no PySide6), suitable for a small one
 - Serves the same FastAPI app and endpoints as the tray version.
 - Uses server receive timestamps for readings, same DB schema.
 - Optional NTP UDP server controlled by settings.ntp_enabled (no Qt).
+- Includes AI subscription management and predictive features.
 """
-import os, sys, time, json, logging, sqlite3, threading, struct, socketserver, webbrowser
+import os, sys, time, json, logging, sqlite3, threading, struct, socketserver, webbrowser, random
+from datetime import datetime, timedelta
 from uvicorn import Config, Server
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -50,6 +52,25 @@ def initialize_db():
             device_id TEXT, sensor_id INTEGER, timestamp INTEGER, temperature_c REAL, humidity REAL
         )""")
         c.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)")
+        # Add AI subscription tables
+        c.execute("""CREATE TABLE IF NOT EXISTS subscriptions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT DEFAULT 'default_user',
+            subscription_type TEXT DEFAULT 'ai_basic',
+            status TEXT DEFAULT 'inactive',
+            start_date INTEGER,
+            end_date INTEGER,
+            payment_method TEXT,
+            amount REAL DEFAULT 9.99,
+            created_at INTEGER DEFAULT (strftime('%s','now')),
+            updated_at INTEGER DEFAULT (strftime('%s','now'))
+        )""")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_subscriptions_user_status ON subscriptions (user_id, status, end_date)")
+        
+        # Add AI subscription settings
+        c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", ('ai_subscription_enabled', 'true'))
+        c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", ('ai_features_active', 'false'))
+        c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", ('ai_monthly_price', '9.99'))
         conn.commit()
 
 def get_setting(key, default=None):
@@ -183,6 +204,152 @@ def get_device_time_range(device_id: str):
         return {"min": int(row[0]) if row[0] is not None else None,
                 "max": int(row[1]) if row[1] is not None else None}
 
+# --- AI Subscription Functions ---
+def get_subscription_status(user_id="default_user"):
+    """Get user's subscription status"""
+    try:
+        with sqlite3.connect(DB_NAME) as conn:
+            conn.row_factory = sqlite3.Row
+            c = conn.cursor()
+            current_time = int(time.time())
+            
+            c.execute("""
+                SELECT * FROM subscriptions 
+                WHERE user_id = ? AND status IN ('active', 'trial') AND end_date > ?
+                ORDER BY end_date DESC LIMIT 1
+            """, (user_id, current_time))
+            
+            subscription = c.fetchone()
+            if subscription:
+                return dict(subscription)
+            return None
+    except Exception as e:
+        logging.error(f"Error getting subscription status: {e}")
+        return None
+
+def create_subscription(user_id="default_user", subscription_type="ai_basic", payment_method="card", amount=9.99):
+    """Create new subscription"""
+    try:
+        with sqlite3.connect(DB_NAME) as conn:
+            c = conn.cursor()
+            start_time = int(time.time())
+            end_time = start_time + (30 * 24 * 60 * 60)  # 30 days
+            
+            c.execute("""
+                INSERT INTO subscriptions 
+                (user_id, subscription_type, status, start_date, end_date, payment_method, amount)
+                VALUES (?, ?, 'active', ?, ?, ?, ?)
+            """, (user_id, subscription_type, start_time, end_time, payment_method, amount))
+            
+            # Activate AI features
+            set_setting('ai_features_active', 'true')
+            conn.commit()
+            return True
+    except Exception as e:
+        logging.error(f"Error creating subscription: {e}")
+        return False
+
+def predict_temperature(device_id, sensor_id, hours_ahead=24):
+    """Simple AI prediction based on historical temperature trends"""
+    try:
+        with sqlite3.connect(DB_NAME) as conn:
+            c = conn.cursor()
+            # Get last 168 hours (7 days) of data for trend analysis
+            current_time = int(time.time())
+            week_ago = current_time - (7 * 24 * 60 * 60)
+            
+            c.execute("""
+                SELECT timestamp, temperature_c FROM readings 
+                WHERE device_id=? AND sensor_id=? AND timestamp > ?
+                ORDER BY timestamp DESC LIMIT 168
+            """, (device_id, sensor_id, week_ago))
+            
+            readings = c.fetchall()
+            if len(readings) < 24:
+                return {"error": "Insufficient data for prediction"}
+            
+            # Simple trend calculation
+            temperatures = [r[1] for r in readings if r[1] is not None]
+            if len(temperatures) < 5:
+                return {"error": "Insufficient temperature data"}
+            
+            # Calculate simple moving average and trend
+            recent_avg = sum(temperatures[:12]) / len(temperatures[:12])
+            older_avg = sum(temperatures[12:24]) / len(temperatures[12:24])
+            trend = recent_avg - older_avg
+            
+            # Predict next temperature with some randomness for realism
+            predicted_temp = recent_avg + (trend * hours_ahead / 24)
+            confidence = max(0.6, 0.9 - abs(trend) * 0.1)  # Lower confidence for high trends
+            
+            return {
+                "predicted_temperature": round(predicted_temp, 1),
+                "confidence": round(confidence * 100, 1),
+                "trend": round(trend, 2),
+                "current_avg": round(recent_avg, 1),
+                "hours_ahead": hours_ahead,
+                "generated_at": current_time
+            }
+    except Exception as e:
+        logging.error(f"Error in temperature prediction: {e}")
+        return {"error": str(e)}
+
+def detect_temperature_anomalies(device_id, sensor_id, hours_back=24):
+    """Simple anomaly detection for temperature readings"""
+    try:
+        with sqlite3.connect(DB_NAME) as conn:
+            c = conn.cursor()
+            current_time = int(time.time())
+            time_back = current_time - (hours_back * 60 * 60)
+            
+            c.execute("""
+                SELECT timestamp, temperature_c FROM readings 
+                WHERE device_id=? AND sensor_id=? AND timestamp > ?
+                ORDER BY timestamp ASC
+            """, (device_id, sensor_id, time_back))
+            
+            readings = c.fetchall()
+            if len(readings) < 10:
+                return {"error": "Insufficient data for anomaly detection"}
+            
+            temperatures = [r[1] for r in readings if r[1] is not None]
+            if len(temperatures) < 10:
+                return {"error": "Insufficient temperature data"}
+            
+            # Calculate statistics
+            avg_temp = sum(temperatures) / len(temperatures)
+            variance = sum((t - avg_temp) ** 2 for t in temperatures) / len(temperatures)
+            std_dev = variance ** 0.5
+            
+            # Find anomalies (readings more than 2 standard deviations from mean)
+            anomalies = []
+            threshold = 2 * std_dev
+            
+            for i, (timestamp, temp) in enumerate(readings):
+                if temp is not None and abs(temp - avg_temp) > threshold:
+                    anomalies.append({
+                        "timestamp": timestamp,
+                        "temperature": temp,
+                        "deviation": round(abs(temp - avg_temp), 2),
+                        "severity": "high" if abs(temp - avg_temp) > 3 * std_dev else "medium"
+                    })
+            
+            return {
+                "anomalies_found": len(anomalies),
+                "anomalies": anomalies,
+                "statistics": {
+                    "average_temperature": round(avg_temp, 2),
+                    "standard_deviation": round(std_dev, 2),
+                    "threshold": round(threshold, 2)
+                },
+                "analysis_period_hours": hours_back,
+                "total_readings": len(readings),
+                "generated_at": current_time
+            }
+    except Exception as e:
+        logging.error(f"Error in anomaly detection: {e}")
+        return {"error": str(e)}
+
 # --- NTP server (no Qt) ---
 class NTPRequestHandler(socketserver.BaseRequestHandler):
     def handle(self):
@@ -262,12 +429,19 @@ async def api_get_history(request: Request):
 
 @app.get("/api/settings")
 def api_get_settings():
+    subscription = get_subscription_status()
+    ai_active = get_setting("ai_features_active", "false") == "true"
+    
     return {
         "server_port": get_setting("server_port", "9090"),
         "ntp_enabled": get_setting("ntp_enabled", "false") == "true",
         "max_points": int(get_setting("max_points", "1000") or 1000),
         "app_version": APP_VERSION,
-        "developer": "Serbinov Oleg"
+        "developer": "Serbinov Oleg",
+        "ai_subscription_enabled": get_setting("ai_subscription_enabled", "true") == "true",
+        "ai_features_active": ai_active,
+        "ai_monthly_price": float(get_setting("ai_monthly_price", "9.99")),
+        "subscription": subscription
     }
 
 @app.post("/api/settings")
@@ -285,8 +459,127 @@ async def api_set_settings(request: Request):
             set_setting('max_points', mp)
         except Exception:
             pass
+    if 'ai_features_active' in settings:
+        set_setting('ai_features_active', "true" if settings['ai_features_active'] else "false")
+    if 'ai_monthly_price' in settings:
+        try:
+            price = float(settings['ai_monthly_price'])
+            if price > 0: set_setting('ai_monthly_price', price)
+        except Exception:
+            pass
     logging.info(f"SETTINGS: Saved: {settings}")
     return {"status": "ok", "message": "Settings saved! Port change requires server restart."}
+
+# --- AI Subscription API Endpoints ---
+@app.get("/api/subscription/status")
+def api_get_subscription_status():
+    """Get current subscription status"""
+    subscription = get_subscription_status()
+    ai_active = get_setting("ai_features_active", "false") == "true"
+    
+    if subscription:
+        # Check if subscription is still valid
+        current_time = int(time.time())
+        is_valid = subscription['end_date'] > current_time
+        
+        return {
+            "has_subscription": True,
+            "subscription": subscription,
+            "is_valid": is_valid,
+            "ai_features_active": ai_active,
+            "days_remaining": max(0, (subscription['end_date'] - current_time) // (24 * 60 * 60))
+        }
+    else:
+        return {
+            "has_subscription": False,
+            "subscription": None,
+            "is_valid": False,
+            "ai_features_active": False,
+            "days_remaining": 0
+        }
+
+@app.post("/api/subscription/purchase")
+async def api_purchase_subscription(request: Request):
+    """Purchase AI subscription"""
+    try:
+        data = await request.json()
+        payment_method = data.get('payment_method', 'card')
+        subscription_type = data.get('subscription_type', 'ai_basic')
+        
+        # Simulate payment processing
+        success = create_subscription(
+            user_id="default_user",
+            subscription_type=subscription_type,
+            payment_method=payment_method,
+            amount=float(get_setting("ai_monthly_price", "9.99"))
+        )
+        
+        if success:
+            logging.info(f"AI subscription purchased: {subscription_type} via {payment_method}")
+            return {
+                "status": "success",
+                "message": "Подписка на ИИ успешно оформлена!",
+                "subscription_type": subscription_type,
+                "duration_days": 30
+            }
+        else:
+            raise HTTPException(status_code=400, detail="Payment processing failed")
+            
+    except Exception as e:
+        logging.error(f"Subscription purchase error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/ai/predict")
+async def api_ai_predict_temperature(request: Request):
+    """AI temperature prediction (requires subscription)"""
+    # Check subscription
+    subscription = get_subscription_status()
+    if not subscription or subscription['end_date'] <= int(time.time()):
+        raise HTTPException(status_code=403, detail="AI features require active subscription")
+    
+    try:
+        data = await request.json()
+        device_id = data.get('device_id')
+        sensor_id = data.get('sensor_id', 0)
+        hours_ahead = data.get('hours_ahead', 24)
+        
+        if not device_id:
+            raise HTTPException(status_code=400, detail="device_id is required")
+        
+        prediction = predict_temperature(device_id, sensor_id, hours_ahead)
+        return prediction
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"AI prediction error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/ai/anomalies")
+async def api_ai_detect_anomalies(request: Request):
+    """AI anomaly detection (requires subscription)"""
+    # Check subscription
+    subscription = get_subscription_status()
+    if not subscription or subscription['end_date'] <= int(time.time()):
+        raise HTTPException(status_code=403, detail="AI features require active subscription")
+    
+    try:
+        data = await request.json()
+        device_id = data.get('device_id')
+        sensor_id = data.get('sensor_id', 0)
+        hours_back = data.get('hours_back', 24)
+        
+        if not device_id:
+            raise HTTPException(status_code=400, detail="device_id is required")
+        
+        anomalies = detect_temperature_anomalies(device_id, sensor_id, hours_back)
+        return anomalies
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"AI anomaly detection error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 def open_in_browser(url: str):
