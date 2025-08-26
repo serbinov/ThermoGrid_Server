@@ -355,6 +355,9 @@ document.addEventListener('DOMContentLoaded', function() {
             form.elements['max_points'].value = maxPointsSetting;
         }
 
+        // Render AI subscription status
+        await renderAISubscriptionSection(settings);
+
         // перехватим submit для сохранения max_points
         form.addEventListener('submit', async (e) => {
             e.preventDefault();
@@ -377,6 +380,204 @@ document.addEventListener('DOMContentLoaded', function() {
                 console.error('Failed to save settings', err);
             }
         }, { once: true });
+    }
+
+    async function renderAISubscriptionSection(settings) {
+        const statusEl = document.getElementById('subscription-status');
+        const paymentFormEl = document.getElementById('payment-form-container');
+        const aiResultsEl = document.getElementById('ai-results');
+        const testPredictionBtn = document.getElementById('test-prediction');
+        const testAnomaliesBtn = document.getElementById('test-anomalies');
+
+        // Get subscription status
+        const subStatus = await fetch('/api/subscription/status').then(r => r.json()).catch(() => null);
+        
+        if (subStatus && subStatus.has_subscription && subStatus.is_valid) {
+            // Active subscription
+            const endDate = new Date(subStatus.subscription.end_date * 1000);
+            statusEl.innerHTML = `
+                <div class="subscription-status ${subStatus.subscription.status}">
+                    <h4>✅ Активная подписка на ИИ</h4>
+                    <p><strong>Тип:</strong> ${subStatus.subscription.subscription_type}</p>
+                    <p><strong>Статус:</strong> ${subStatus.subscription.status}</p>
+                    <p><strong>Действует до:</strong> ${endDate.toLocaleDateString('ru-RU')} ${endDate.toLocaleTimeString('ru-RU')}</p>
+                    <p><strong>Осталось дней:</strong> ${subStatus.days_remaining}</p>
+                </div>
+            `;
+            paymentFormEl.style.display = 'none';
+            
+            // Enable AI feature buttons
+            testPredictionBtn.disabled = false;
+            testAnomaliesBtn.disabled = false;
+            
+        } else {
+            // No active subscription
+            statusEl.innerHTML = `
+                <div class="subscription-status inactive">
+                    <h4>❌ Подписка на ИИ не активна</h4>
+                    <p>Для использования ИИ функций (предсказание температуры, обнаружение аномалий) необходима активная подписка.</p>
+                    <button class="purchase-ai-button" onclick="showPaymentForm()">Оплатить подписку на ИИ</button>
+                </div>
+            `;
+            
+            // Disable AI feature buttons
+            testPredictionBtn.disabled = true;
+            testAnomaliesBtn.disabled = true;
+        }
+
+        // Setup payment form
+        const paymentForm = document.getElementById('payment-form');
+        paymentForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            await handlePayment();
+        });
+
+        const cancelPaymentBtn = document.getElementById('cancel-payment');
+        cancelPaymentBtn.addEventListener('click', () => {
+            paymentFormEl.style.display = 'none';
+        });
+
+        // Setup AI feature test buttons
+        testPredictionBtn.addEventListener('click', async () => {
+            if (!selectedDeviceId) {
+                alert('Сначала выберите устройство в списке слева');
+                return;
+            }
+            await testAIPrediction();
+        });
+
+        testAnomaliesBtn.addEventListener('click', async () => {
+            if (!selectedDeviceId) {
+                alert('Сначала выберите устройство в списке слева');
+                return;
+            }
+            await testAIAnomalies();
+        });
+    }
+
+    function showPaymentForm() {
+        const paymentFormEl = document.getElementById('payment-form-container');
+        paymentFormEl.style.display = 'block';
+        paymentFormEl.scrollIntoView({ behavior: 'smooth' });
+    }
+    
+    // Make function globally available
+    window.showPaymentForm = showPaymentForm;
+
+    async function handlePayment() {
+        const paymentForm = document.getElementById('payment-form');
+        const paymentData = {
+            subscription_type: paymentForm.elements['subscription_type'].value,
+            payment_method: paymentForm.elements['payment_method'].value
+        };
+
+        try {
+            const response = await fetch('/api/subscription/purchase', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(paymentData)
+            });
+
+            const result = await response.json();
+            
+            if (response.ok) {
+                alert(result.message);
+                // Refresh the settings view to show new subscription status
+                renderSettingsView();
+            } else {
+                alert(`Ошибка оплаты: ${result.detail}`);
+            }
+        } catch (error) {
+            alert(`Ошибка при обработке платежа: ${error.message}`);
+        }
+    }
+
+    async function testAIPrediction() {
+        const aiResultsEl = document.getElementById('ai-results');
+        aiResultsEl.innerHTML = 'Выполняется предсказание температуры...';
+        aiResultsEl.classList.add('visible');
+
+        try {
+            const response = await fetch('/api/ai/predict', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    device_id: selectedDeviceId,
+                    sensor_id: 0,
+                    hours_ahead: 24
+                })
+            });
+
+            const result = await response.json();
+            
+            if (response.ok) {
+                if (result.error) {
+                    aiResultsEl.innerHTML = `Ошибка предсказания: ${result.error}`;
+                } else {
+                    aiResultsEl.innerHTML = `🤖 ИИ Предсказание температуры:
+                    
+Предсказанная температура через 24 часа: ${result.predicted_temperature}°C
+Уверенность: ${result.confidence}%
+Тренд: ${result.trend > 0 ? '+' : ''}${result.trend}°C
+Текущее среднее: ${result.current_avg}°C
+
+Анализ выполнен: ${new Date(result.generated_at * 1000).toLocaleString('ru-RU')}`;
+                }
+            } else {
+                aiResultsEl.innerHTML = `Ошибка: ${result.detail}`;
+            }
+        } catch (error) {
+            aiResultsEl.innerHTML = `Ошибка сети: ${error.message}`;
+        }
+    }
+
+    async function testAIAnomalies() {
+        const aiResultsEl = document.getElementById('ai-results');
+        aiResultsEl.innerHTML = 'Анализ аномалий температуры...';
+        aiResultsEl.classList.add('visible');
+
+        try {
+            const response = await fetch('/api/ai/anomalies', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    device_id: selectedDeviceId,
+                    sensor_id: 0,
+                    hours_back: 24
+                })
+            });
+
+            const result = await response.json();
+            
+            if (response.ok) {
+                if (result.error) {
+                    aiResultsEl.innerHTML = `Ошибка анализа: ${result.error}`;
+                } else {
+                    let anomaliesText = result.anomalies.map(a => 
+                        `• ${new Date(a.timestamp * 1000).toLocaleString('ru-RU')}: ${a.temperature}°C (отклонение: ${a.deviation}°C, уровень: ${a.severity})`
+                    ).join('\n');
+
+                    aiResultsEl.innerHTML = `🔍 ИИ Анализ аномалий температуры:
+
+Найдено аномалий: ${result.anomalies_found}
+Период анализа: ${result.analysis_period_hours} часов
+Всего показаний: ${result.total_readings}
+
+Статистика:
+• Средняя температура: ${result.statistics.average_temperature}°C
+• Стандартное отклонение: ${result.statistics.standard_deviation}°C
+• Порог аномалии: ±${result.statistics.threshold}°C
+
+${result.anomalies_found > 0 ? 'Обнаруженные аномалии:\n' + anomaliesText : 'Аномалий не обнаружено 👍'}
+
+Анализ выполнен: ${new Date(result.generated_at * 1000).toLocaleString('ru-RU')}`;
+                }
+            } else {
+                aiResultsEl.innerHTML = `Ошибка: ${result.detail}`;
+            }
+        } catch (error) {
+            aiResultsEl.innerHTML = `Ошибка сети: ${error.message}`;
+        }
     }
 
     async function updateChart(device) {

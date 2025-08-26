@@ -133,6 +133,45 @@
                             </div>
                             <button type="submit">Сохранить настройки</button>
                         </form>
+                        
+                        <!-- AI Subscription Section -->
+                        <div id="ai-subscription-section" class="ai-subscription-section" style="margin-top: 40px;">
+                            <h2>ИИ подписка</h2>
+                            <div id="subscription-status" class="subscription-status">
+                                <!-- Status will be populated by JS -->
+                            </div>
+                            <div id="payment-form-container" class="payment-form-container" style="display: none;">
+                                <form id="payment-form">
+                                    <div class="form-group">
+                                        <label>Тип подписки</label>
+                                        <select name="subscription_type" id="subscription-type">
+                                            <option value="ai_basic">ИИ Базовый (9.99$/мес)</option>
+                                            <option value="ai_premium">ИИ Премиум (19.99$/мес)</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
+                                        <label>Способ оплаты</label>
+                                        <select name="payment_method" id="payment-method">
+                                            <option value="card">Банковская карта</option>
+                                            <option value="paypal">PayPal</option>
+                                            <option value="crypto">Криптовалюта</option>
+                                        </select>
+                                    </div>
+                                    <button type="submit" class="subscribe-button">Оплатить подписку</button>
+                                    <button type="button" id="cancel-payment" class="cancel-button">Отмена</button>
+                                </form>
+                            </div>
+                            
+                            <!-- AI Features Demo -->
+                            <div id="ai-features-demo" class="ai-features-demo" style="margin-top: 20px;">
+                                <h3>ИИ функции</h3>
+                                <div class="ai-feature-buttons">
+                                    <button id="test-prediction" class="ai-feature-button" disabled>Тестировать предсказание температуры</button>
+                                    <button id="test-anomalies" class="ai-feature-button" disabled>Тестировать обнаружение аномалий</button>
+                                </div>
+                                <div id="ai-results" class="ai-results"></div>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </main>

@@ -712,3 +712,154 @@ button[type="submit"]:hover {
         height: auto;
     }
 }
+
+/* AI Subscription Styles */
+.ai-subscription-section {
+    background: white;
+    border-radius: 8px;
+    padding: 30px;
+    max-width: 600px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+    border-left: 4px solid #409eff;
+}
+
+.subscription-status {
+    background: #f8f9fa;
+    border: 1px solid #e9ecef;
+    border-radius: 6px;
+    padding: 15px;
+    margin-bottom: 20px;
+}
+
+.subscription-status.active {
+    background: #d4edda;
+    border-color: #c3e6cb;
+    color: #155724;
+}
+
+.subscription-status.trial {
+    background: #fff3cd;
+    border-color: #ffeeba;
+    color: #856404;
+}
+
+.subscription-status.inactive {
+    background: #f8d7da;
+    border-color: #f5c6cb;
+    color: #721c24;
+}
+
+.payment-form-container {
+    background: #f8f9fa;
+    border: 1px solid #e9ecef;
+    border-radius: 6px;
+    padding: 20px;
+    margin-bottom: 20px;
+}
+
+.form-group select {
+    width: 100%;
+    padding: 10px;
+    border: 1px solid #dcdfe6;
+    border-radius: 6px;
+    font-size: 14px;
+    box-sizing: border-box;
+    background: white;
+}
+
+.subscribe-button {
+    background: #28a745;
+    color: white;
+    border: none;
+    padding: 12px 24px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+    margin-right: 10px;
+}
+
+.subscribe-button:hover {
+    background: #218838;
+}
+
+.cancel-button {
+    background: #6c757d;
+    color: white;
+    border: none;
+    padding: 12px 24px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+}
+
+.cancel-button:hover {
+    background: #5a6268;
+}
+
+.ai-features-demo {
+    border-top: 1px solid #e9ecef;
+    padding-top: 20px;
+}
+
+.ai-feature-buttons {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 20px;
+}
+
+.ai-feature-button {
+    background: #17a2b8;
+    color: white;
+    border: none;
+    padding: 10px 16px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+}
+
+.ai-feature-button:hover:not(:disabled) {
+    background: #138496;
+}
+
+.ai-feature-button:disabled {
+    background: #6c757d;
+    cursor: not-allowed;
+    opacity: 0.6;
+}
+
+.ai-results {
+    background: #f8f9fa;
+    border: 1px solid #e9ecef;
+    border-radius: 6px;
+    padding: 15px;
+    font-family: 'Courier New', monospace;
+    font-size: 12px;
+    white-space: pre-wrap;
+    max-height: 300px;
+    overflow-y: auto;
+    display: none;
+}
+
+.ai-results.visible {
+    display: block;
+}
+
+.purchase-ai-button {
+    background: #28a745;
+    color: white;
+    border: none;
+    padding: 12px 24px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+    margin-top: 15px;
+}
+
+.purchase-ai-button:hover {
+    background: #218838;
+}
